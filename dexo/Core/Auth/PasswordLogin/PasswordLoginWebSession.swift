@@ -7,7 +7,7 @@ struct PasswordLoginBridgeResult {
     let body: String
 }
 
-/// Hidden WKWebView that runs csrf → hCaptcha create → session.json with browser TLS.
+/// WKWebView session that runs csrf → hCaptcha create → session.json with browser TLS.
 @MainActor
 final class PasswordLoginWebSession: NSObject {
     private let forum: ForumInstance
@@ -16,9 +16,11 @@ final class PasswordLoginWebSession: NSObject {
 
     private var webView: WKWebView?
     private var hostController: UIViewController?
+    private var proxyLease: AnyObject?
+    private var trustEvaluator: WebViewProxyTrustEvaluator?
     private var resultContinuation: CheckedContinuation<PasswordLoginBridgeResult, Error>?
     private var readyContinuation: CheckedContinuation<Void, Error>?
-    private var didFailReady = false
+    private var captchaContinuation: CheckedContinuation<String, Error>?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -35,6 +37,10 @@ final class PasswordLoginWebSession: NSObject {
         controller.add(self, name: "dexoPasswordLogin")
         controller.add(self, name: "dexoPasswordLoginReady")
         controller.add(self, name: "dexoPasswordLoginCaptcha")
+
+        // Keep the non-persistent jar; still route through DoH when enabled.
+        proxyLease = try? await WebViewDoHConfigurator.configurePreservingDataStore(wkConfig)
+        trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
         webView.navigationDelegate = self
@@ -55,7 +61,6 @@ final class PasswordLoginWebSession: NSObject {
             webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
-        // Retain a host reference for teardown symmetry with child-VC path.
         self.webView = webView
         self.hostController = presenter
 
@@ -65,9 +70,10 @@ final class PasswordLoginWebSession: NSObject {
             excludingNames: WebCookieStore.discourseSessionCookieNames
         )
 
+        let hint = String(localized: "password_login.captcha_hint")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.readyContinuation = cont
-            webView.loadHTMLString(Self.makeHTML(config: config), baseURL: baseURL)
+            webView.loadHTMLString(Self.makeHTML(config: config, captchaHint: hint), baseURL: baseURL)
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 25_000_000_000)
                 guard let self, let pending = self.readyContinuation else { return }
@@ -102,7 +108,6 @@ final class PasswordLoginWebSession: NSObject {
             self.resultContinuation = cont
             webView.evaluateJavaScript(script) { _, error in
                 if let error {
-                    // Result may still arrive via bridge; only fail if nothing pending later.
                     #if DEBUG
                     print("[PasswordLogin] evaluate error: \(error)")
                     #endif
@@ -117,8 +122,6 @@ final class PasswordLoginWebSession: NSObject {
             self.captchaContinuation = cont
         }
     }
-
-    private var captchaContinuation: CheckedContinuation<String, Error>?
 
     func exportSessionCookies() async throws -> (cookies: [HTTPCookie], userAgent: String?) {
         guard let webView, let host = baseURL.host else {
@@ -144,6 +147,8 @@ final class PasswordLoginWebSession: NSObject {
         }
         hostController = nil
         webView = nil
+        proxyLease = nil
+        trustEvaluator = nil
         if let readyContinuation {
             self.readyContinuation = nil
             readyContinuation.resume(throwing: PasswordLoginError.canceled)
@@ -163,9 +168,13 @@ final class PasswordLoginWebSession: NSObject {
         return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
     }
 
-    private static func makeHTML(config: PasswordLoginConfig) -> String {
+    private static func makeHTML(config: PasswordLoginConfig, captchaHint: String) -> String {
         let endpointsJSON = (try? String(data: JSONSerialization.data(withJSONObject: config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"
         let siteKey = config.hCaptchaSiteKey
+        let hintHTML = captchaHint
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
         return """
         <!DOCTYPE html>
         <html>
@@ -180,7 +189,7 @@ final class PasswordLoginWebSession: NSObject {
         </head>
         <body>
           <div class="wrap">
-            <div class="hint">Security check</div>
+            <div class="hint">\(hintHTML)</div>
             <div class="h-captcha" data-sitekey="\(siteKey)" data-callback="onPass" data-error-callback="onErr" data-expired-callback="onExp"></div>
           </div>
           <script>
@@ -269,7 +278,7 @@ extension PasswordLoginWebSession: WKScriptMessageHandler {
             }
         case "dexoPasswordLoginCaptcha":
             let raw = "\(message.body)"
-            if raw.contains("error"), let captchaContinuation {
+            if raw.contains("\"error\""), let captchaContinuation {
                 self.captchaContinuation = nil
                 captchaContinuation.resume(throwing: PasswordLoginError.captchaFailed)
                 return
@@ -298,4 +307,16 @@ extension PasswordLoginWebSession: WKScriptMessageHandler {
     }
 }
 
-extension PasswordLoginWebSession: WKNavigationDelegate {}
+extension PasswordLoginWebSession: WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if let credential = trustEvaluator?.credential(for: challenge) {
+            completionHandler(.useCredential, credential)
+            return
+        }
+        completionHandler(.performDefaultHandling, nil)
+    }
+}

@@ -22,6 +22,20 @@ enum WebViewDoHConfigurator {
         return lease
     }
 
+    /// Applies the DoH CONNECT proxy to whatever data store the caller already
+    /// attached (e.g. a non-persistent jar for password login), without
+    /// replacing it with the shared default store.
+    static func configurePreservingDataStore(
+        _ configuration: WKWebViewConfiguration
+    ) async throws -> AnyObject? {
+        guard #available(iOS 17.0, *) else { return nil }
+        configuration.websiteDataStore.proxyConfigurations = []
+        guard AppSettings.shared.dohEnabled else { return nil }
+        let lease = try await WebViewDoHProxy.shared.acquire()
+        configuration.websiteDataStore.proxyConfigurations = [lease.proxyConfiguration]
+        return lease
+    }
+
     /// Configures the debug browser for a pure local MITM capture. This path
     /// intentionally ignores the DoH switch and uses normal URLSession
     /// networking upstream so certificate interception can be tested alone.

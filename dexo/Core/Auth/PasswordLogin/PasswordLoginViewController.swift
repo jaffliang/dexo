@@ -299,7 +299,12 @@ final class PasswordLoginViewController: BaseViewController {
         case "csrf" where result.status == 403 && !didRetryCF:
             didRetryCF = true
             setBusy(true, status: String(localized: "password_login.status.cloudflare_retry"))
-            try await CloudflareClearanceGate.ensureClearance(for: forum, config: config, from: self)
+            try await CloudflareClearanceGate.ensureClearance(
+                for: forum,
+                config: config,
+                from: self,
+                force: true
+            )
             try await session.reprimeCookies()
             try await completeLogin(
                 session: session,
@@ -314,18 +319,18 @@ final class PasswordLoginViewController: BaseViewController {
         case "hcaptcha":
             throw PasswordLoginError.captchaFailed
         case "session":
+            if looksLikeSecondFactor(result.body), secondFactor == nil {
+                let code = try await promptSecondFactor()
+                try await completeLogin(
+                    session: session,
+                    identifier: identifier,
+                    password: password,
+                    captchaToken: nil,
+                    secondFactor: code
+                )
+                return
+            }
             if result.status == 200 {
-                if looksLikeSecondFactor(result.body) && secondFactor == nil {
-                    let code = try await promptSecondFactor()
-                    try await completeLogin(
-                        session: session,
-                        identifier: identifier,
-                        password: password,
-                        captchaToken: nil,
-                        secondFactor: code
-                    )
-                    return
-                }
                 let exported = try await session.exportSessionCookies()
                 try await authManager.loginViaWeb(
                     forum: forum,
@@ -349,7 +354,10 @@ final class PasswordLoginViewController: BaseViewController {
 
     private func looksLikeSecondFactor(_ body: String) -> Bool {
         let lower = body.lowercased()
-        return lower.contains("second_factor") || lower.contains("two_factor") || lower.contains("totp")
+        return lower.contains("second_factor")
+            || lower.contains("two_factor")
+            || lower.contains("totp")
+            || lower.contains("second factor")
     }
 
     private func promptSecondFactor() async throws -> String {
