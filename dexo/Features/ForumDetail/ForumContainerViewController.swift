@@ -418,6 +418,13 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
             guard let self else { return }
             self.presentWebLogin(then: action)
         })
+        // Option 3: Native password login (linux.do — Cloudflare + hCaptcha)
+        if let passwordConfig = PasswordLoginConfig.config(for: forum.baseURL) {
+            alert.addAction(UIAlertAction(title: String(localized: "login.method.password"), style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.presentPasswordLogin(config: passwordConfig, then: action)
+            })
+        }
         alert.addAction(UIAlertAction(title: String(localized: "action.cancel"), style: .cancel))
         present(alert, animated: true)
     }
@@ -441,6 +448,29 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
             }
         }
         let nav = UINavigationController(rootViewController: vc)
+        present(nav, animated: true)
+    }
+
+    private func presentPasswordLogin(config: PasswordLoginConfig, then action: @escaping () -> Void) {
+        let vc = PasswordLoginViewController(forum: forum, config: config)
+        vc.onFinished = { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                if let forums = try? DatabaseManager.shared.fetchAllForums(),
+                   let updated = forums.first(where: { $0.id == self.forum.id })
+                {
+                    self.forum = updated
+                }
+                action()
+            case .failure(PasswordLoginError.canceled):
+                break
+            case .failure:
+                self.presentLoginFailure()
+            }
+        }
+        let nav = UINavigationController(rootViewController: vc)
+        nav.modalPresentationStyle = .pageSheet
         present(nav, animated: true)
     }
 

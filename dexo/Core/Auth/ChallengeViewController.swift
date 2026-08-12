@@ -54,6 +54,9 @@ final class ChallengeViewController: BaseViewController {
     private var setupTask: Task<Void, Never>?
     private var isFinalCookieSyncInProgress = false
     private var isObservingCookieChanges = false
+    private var waitContinuation: CheckedContinuation<Void, Never>?
+    private var didResumeWait = false
+    private var presentationDelegate: ChallengePresentationDelegate?
 
     private func makeWebViewConfiguration() async throws -> (WKWebViewConfiguration, AnyObject?) {
         let config = WKWebViewConfiguration()
@@ -221,8 +224,18 @@ final class ChallengeViewController: BaseViewController {
         isFinalCookieSyncInProgress = true
         Task { @MainActor in
             await syncWebSession()
-            dismiss(animated: true)
+            dismiss(animated: true) { [weak self] in
+                self?.resumeWaitIfNeeded()
+            }
         }
+    }
+
+    private func resumeWaitIfNeeded() {
+        guard let waitContinuation, !didResumeWait else { return }
+        didResumeWait = true
+        self.waitContinuation = nil
+        presentationDelegate = nil
+        waitContinuation.resume()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -242,6 +255,13 @@ final class ChallengeViewController: BaseViewController {
             webView?.configuration.websiteDataStore.httpCookieStore.remove(coordinator)
             isObservingCookieChanges = false
         }
+        // Swipe-to-dismiss / interactive sheet paths may not go through
+        // syncAndDismiss's completion handler; still unblock awaiters.
+        if view.window == nil,
+           isBeingDismissed || navigationController?.isBeingDismissed == true || presentingViewController == nil
+        {
+            resumeWaitIfNeeded()
+        }
     }
 
     /// Convenience for presenting the challenge flow from any view controller.
@@ -251,6 +271,44 @@ final class ChallengeViewController: BaseViewController {
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .pageSheet
         presenter.present(nav, animated: true)
+    }
+
+    /// Presents the challenge sheet and suspends until it is dismissed
+    /// (Done, Cancel, or interactive swipe). Cookies are synced on the
+    /// existing dismissal paths before this returns in the common case.
+    @MainActor
+    static func presentAndWait(
+        from presenter: UIViewController,
+        challengeURL: URL = URL(string: "https://linux.do/challenge")!
+    ) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let vc = ChallengeViewController(
+                targetURL: challengeURL,
+                userAgent: WebCookieStore.shared.userAgent
+            )
+            vc.waitContinuation = cont
+            let nav = UINavigationController(rootViewController: vc)
+            nav.modalPresentationStyle = .pageSheet
+            let delegate = ChallengePresentationDelegate { [weak vc] in
+                vc?.resumeWaitIfNeeded()
+            }
+            vc.presentationDelegate = delegate
+            nav.presentationController?.delegate = delegate
+            presenter.present(nav, animated: true)
+        }
+    }
+
+    /// Bridges interactive page-sheet dismissal into `presentAndWait`.
+    private final class ChallengePresentationDelegate: NSObject, UIAdaptivePresentationControllerDelegate {
+        private let onDismiss: () -> Void
+
+        init(onDismiss: @escaping () -> Void) {
+            self.onDismiss = onDismiss
+        }
+
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            onDismiss()
+        }
     }
 
     private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
