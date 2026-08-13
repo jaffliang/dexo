@@ -1,10 +1,97 @@
 import UIKit
 import WebKit
 
-struct PasswordLoginBridgeResult {
+nonisolated struct PasswordLoginBridgeResult: Sendable {
     let phase: String
     let status: Int
     let body: String
+}
+
+/// Parsed `webkit.messageHandlers` payload. Built off the main actor so
+/// `WKScriptMessage.body` (`Any`) never crosses isolation.
+nonisolated enum PasswordLoginScriptMessage: Sendable {
+    case ready
+    case captchaToken(String)
+    case captchaError
+    case login(PasswordLoginBridgeResult)
+    case loginParseError(String)
+    case ignored
+
+    static func parse(name: String, body: Any) -> PasswordLoginScriptMessage {
+        switch name {
+        case "dexoPasswordLoginReady":
+            return .ready
+        case "dexoPasswordLoginCaptcha":
+            return parseCaptcha(body)
+        case "dexoPasswordLogin":
+            return parseLogin(body)
+        default:
+            return .ignored
+        }
+    }
+
+    private static func dictionary(from body: Any) -> [String: Any]? {
+        if let dict = body as? [String: Any] {
+            return dict
+        }
+        if let string = body as? String,
+           let data = string.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return obj
+        }
+        return nil
+    }
+
+    private static func parseCaptcha(_ body: Any) -> PasswordLoginScriptMessage {
+        if let dict = dictionary(from: body) {
+            if let error = dict["error"] as? String, !error.isEmpty {
+                return .captchaError
+            }
+            if let token = dict["token"] as? String, !token.isEmpty {
+                return .captchaToken(token)
+            }
+            return .captchaError
+        }
+        if let string = body as? String, !string.isEmpty {
+            return .captchaToken(string)
+        }
+        return .captchaError
+    }
+
+    private static func parseLogin(_ body: Any) -> PasswordLoginScriptMessage {
+        guard let dict = dictionary(from: body) else {
+            return .loginParseError("\(body)")
+        }
+        let phase = dict["phase"] as? String ?? "unknown"
+        let status: Int
+        if let intStatus = dict["status"] as? Int {
+            status = intStatus
+        } else if let number = dict["status"] as? NSNumber {
+            status = number.intValue
+        } else {
+            status = 0
+        }
+        let resultBody = dict["body"] as? String ?? ""
+        return .login(PasswordLoginBridgeResult(phase: phase, status: status, body: resultBody))
+    }
+}
+
+/// WebKit delivers `WKScriptMessageHandler` callbacks off the main actor.
+/// This type stays `nonisolated` and hops onto MainActor before touching session state.
+private nonisolated final class PasswordLoginScriptBridge: NSObject, WKScriptMessageHandler, @unchecked Sendable {
+    weak var session: PasswordLoginWebSession?
+
+    init(session: PasswordLoginWebSession) {
+        self.session = session
+        super.init()
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        let parsed = PasswordLoginScriptMessage.parse(name: message.name, body: message.body)
+        Task { @MainActor [weak session] in
+            session?.handleScriptMessage(parsed)
+        }
+    }
 }
 
 /// WKWebView session that runs csrf → hCaptcha create → session.json with browser TLS.
@@ -15,12 +102,16 @@ final class PasswordLoginWebSession: NSObject {
     private let baseURL: URL
 
     private var webView: WKWebView?
+    private var popupWebViews: [WKWebView] = []
     private var hostController: UIViewController?
     private var proxyLease: AnyObject?
     private var trustEvaluator: WebViewProxyTrustEvaluator?
+    private var scriptBridge: PasswordLoginScriptBridge?
     private var resultContinuation: CheckedContinuation<PasswordLoginBridgeResult, Error>?
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var captchaContinuation: CheckedContinuation<String, Error>?
+    private var pendingCaptchaToken: String?
+    private var readyTimeoutTask: Task<Void, Never>?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -35,9 +126,11 @@ final class PasswordLoginWebSession: NSObject {
         wkConfig.websiteDataStore = .nonPersistent()
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
         let controller = wkConfig.userContentController
-        controller.add(self, name: "dexoPasswordLogin")
-        controller.add(self, name: "dexoPasswordLoginReady")
-        controller.add(self, name: "dexoPasswordLoginCaptcha")
+        let bridge = PasswordLoginScriptBridge(session: self)
+        scriptBridge = bridge
+        controller.add(bridge, name: "dexoPasswordLogin")
+        controller.add(bridge, name: "dexoPasswordLoginReady")
+        controller.add(bridge, name: "dexoPasswordLoginCaptcha")
         controller.addUserScript(WKUserScript(
             source: "document.documentElement.style.colorScheme = 'light dark';",
             injectionTime: .atDocumentStart,
@@ -85,11 +178,11 @@ final class PasswordLoginWebSession: NSObject {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.readyContinuation = cont
             webView.loadHTMLString(Self.makeHTML(config: config, captchaHint: hint), baseURL: baseURL)
-            Task { [weak self] in
+            readyTimeoutTask?.cancel()
+            readyTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 25_000_000_000)
-                guard let self, let pending = self.readyContinuation else { return }
-                self.readyContinuation = nil
-                pending.resume(throwing: PasswordLoginError.captchaFailed)
+                guard !Task.isCancelled else { return }
+                self?.takeReadyContinuation()?.resume(throwing: PasswordLoginError.captchaFailed)
             }
         }
     }
@@ -117,11 +210,16 @@ final class PasswordLoginWebSession: NSObject {
         let script = "window.__dexoPasswordLogin(\(idJS), \(pwJS), \(captchaJS), \(totpJS));"
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PasswordLoginBridgeResult, Error>) in
             self.resultContinuation = cont
-            webView.evaluateJavaScript(script) { _, error in
-                if let error {
-                    #if DEBUG
-                    print("[PasswordLogin] evaluate error: \(error)")
-                    #endif
+            webView.evaluateJavaScript(script) { [weak self] _, error in
+                guard let error else { return }
+                Task { @MainActor [weak self] in
+                    self?.takeResultContinuation()?.resume(
+                        throwing: PasswordLoginError.unexpected(
+                            status: 0,
+                            phase: "evaluate",
+                            body: error.localizedDescription
+                        )
+                    )
                 }
             }
         }
@@ -129,7 +227,11 @@ final class PasswordLoginWebSession: NSObject {
 
     /// Waits for the first hCaptcha token from the embedded widget.
     func waitForCaptchaToken() async throws -> String {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+        if let pendingCaptchaToken {
+            self.pendingCaptchaToken = nil
+            return pendingCaptchaToken
+        }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             self.captchaContinuation = cont
         }
     }
@@ -150,28 +252,109 @@ final class PasswordLoginWebSession: NSObject {
     }
 
     func tearDown() {
+        readyTimeoutTask?.cancel()
+        readyTimeoutTask = nil
+        scriptBridge?.session = nil
+        scriptBridge = nil
+        dismissAllPopups()
         if let webView {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "dexoPasswordLogin")
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "dexoPasswordLoginReady")
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "dexoPasswordLoginCaptcha")
+            webView.navigationDelegate = nil
+            webView.uiDelegate = nil
             webView.removeFromSuperview()
         }
         hostController = nil
         webView = nil
         proxyLease = nil
         trustEvaluator = nil
-        if let readyContinuation {
-            self.readyContinuation = nil
-            readyContinuation.resume(throwing: PasswordLoginError.canceled)
+        pendingCaptchaToken = nil
+        takeReadyContinuation()?.resume(throwing: PasswordLoginError.canceled)
+        takeResultContinuation()?.resume(throwing: PasswordLoginError.canceled)
+        takeCaptchaContinuation()?.resume(throwing: PasswordLoginError.canceled)
+    }
+
+    fileprivate func handleScriptMessage(_ message: PasswordLoginScriptMessage) {
+        switch message {
+        case .ready:
+            readyTimeoutTask?.cancel()
+            readyTimeoutTask = nil
+            takeReadyContinuation()?.resume()
+        case .captchaToken(let token):
+            dismissAllPopups()
+            if let continuation = takeCaptchaContinuation() {
+                continuation.resume(returning: token)
+            } else {
+                pendingCaptchaToken = token
+            }
+        case .captchaError:
+            takeCaptchaContinuation()?.resume(throwing: PasswordLoginError.captchaFailed)
+        case .login(let result):
+            takeResultContinuation()?.resume(returning: result)
+        case .loginParseError(let raw):
+            takeResultContinuation()?.resume(
+                throwing: PasswordLoginError.unexpected(status: 0, phase: "parse", body: raw)
+            )
+        case .ignored:
+            break
         }
-        if let resultContinuation {
-            self.resultContinuation = nil
-            resultContinuation.resume(throwing: PasswordLoginError.canceled)
+    }
+
+    private func takeReadyContinuation() -> CheckedContinuation<Void, Error>? {
+        let pending = readyContinuation
+        readyContinuation = nil
+        return pending
+    }
+
+    private func takeResultContinuation() -> CheckedContinuation<PasswordLoginBridgeResult, Error>? {
+        let pending = resultContinuation
+        resultContinuation = nil
+        return pending
+    }
+
+    private func takeCaptchaContinuation() -> CheckedContinuation<String, Error>? {
+        let pending = captchaContinuation
+        captchaContinuation = nil
+        return pending
+    }
+
+    private func attachPopup(_ popup: WKWebView, over parent: WKWebView) {
+        popup.navigationDelegate = self
+        popup.uiDelegate = self
+        popup.customUserAgent = parent.customUserAgent
+        popup.isOpaque = false
+        popup.backgroundColor = ThemeManager.shared.cardBackgroundColor
+        popup.scrollView.keyboardDismissMode = .interactive
+        popup.scrollView.contentInsetAdjustmentBehavior = .never
+
+        let host = parent.superview ?? hostController?.view ?? parent
+        host.addSubview(popup)
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            popup.topAnchor.constraint(equalTo: host.topAnchor),
+            popup.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            popup.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            popup.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        popupWebViews.append(popup)
+    }
+
+    private func dismissPopup(_ webView: WKWebView) {
+        guard let index = popupWebViews.firstIndex(of: webView) else { return }
+        popupWebViews.remove(at: index)
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        webView.removeFromSuperview()
+    }
+
+    private func dismissAllPopups() {
+        for popup in popupWebViews {
+            popup.navigationDelegate = nil
+            popup.uiDelegate = nil
+            popup.removeFromSuperview()
         }
-        if let captchaContinuation {
-            self.captchaContinuation = nil
-            captchaContinuation.resume(throwing: PasswordLoginError.canceled)
-        }
+        popupWebViews.removeAll()
     }
 
     private static func jsString(_ value: String) -> String {
@@ -228,14 +411,14 @@ final class PasswordLoginWebSession: NSObject {
             function post(name, payload) {
               try { window.webkit.messageHandlers[name].postMessage(payload); } catch (e) {}
             }
-            function onPass(token) { post('dexoPasswordLoginCaptcha', String(token || '')); }
-            function onErr(err) { post('dexoPasswordLoginCaptcha', JSON.stringify({ error: String(err || 'unknown') })); }
-            function onExp() { post('dexoPasswordLoginCaptcha', JSON.stringify({ error: 'expired' })); }
+            function onPass(token) { post('dexoPasswordLoginCaptcha', { token: String(token || '') }); }
+            function onErr(err) { post('dexoPasswordLoginCaptcha', { error: String(err || 'unknown') }); }
+            function onExp() { post('dexoPasswordLoginCaptcha', { error: 'expired' }); }
             document.addEventListener('DOMContentLoaded', function() {
               post('dexoPasswordLoginReady', 'ready');
             });
             window.__dexoPasswordLogin = async function(identifier, password, hcaptchaToken, secondFactorToken) {
-              function done(p) { post('dexoPasswordLogin', JSON.stringify(p)); }
+              function done(p) { post('dexoPasswordLogin', p); }
               try {
                 var c = await fetch('/session/csrf', {
                   method: 'GET',
@@ -300,45 +483,6 @@ final class PasswordLoginWebSession: NSObject {
     }
 }
 
-extension PasswordLoginWebSession: WKScriptMessageHandler {
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        switch message.name {
-        case "dexoPasswordLoginReady":
-            if let readyContinuation {
-                self.readyContinuation = nil
-                readyContinuation.resume()
-            }
-        case "dexoPasswordLoginCaptcha":
-            let raw = "\(message.body)"
-            if raw.contains("\"error\""), let captchaContinuation {
-                self.captchaContinuation = nil
-                captchaContinuation.resume(throwing: PasswordLoginError.captchaFailed)
-                return
-            }
-            if let captchaContinuation {
-                self.captchaContinuation = nil
-                captchaContinuation.resume(returning: raw)
-            }
-        case "dexoPasswordLogin":
-            guard let resultContinuation else { return }
-            self.resultContinuation = nil
-            let raw = "\(message.body)"
-            guard let data = raw.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                resultContinuation.resume(throwing: PasswordLoginError.unexpected(status: 0, phase: "parse", body: raw))
-                return
-            }
-            let phase = obj["phase"] as? String ?? "unknown"
-            let status = obj["status"] as? Int ?? 0
-            let body = obj["body"] as? String ?? ""
-            resultContinuation.resume(returning: PasswordLoginBridgeResult(phase: phase, status: status, body: body))
-        default:
-            break
-        }
-    }
-}
-
 extension PasswordLoginWebSession: WKNavigationDelegate, WKUIDelegate {
     func webView(
         _ webView: WKWebView,
@@ -358,9 +502,15 @@ extension PasswordLoginWebSession: WKNavigationDelegate, WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if navigationAction.targetFrame == nil {
-            webView.load(navigationAction.request)
-        }
-        return nil
+        guard navigationAction.targetFrame == nil else { return nil }
+        // Must use WebKit's configuration (shared process pool / data store).
+        // Loading the popup request into the captcha WKWebView would destroy the widget.
+        let popup = WKWebView(frame: .zero, configuration: configuration)
+        attachPopup(popup, over: webView)
+        return popup
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        dismissPopup(webView)
     }
 }
