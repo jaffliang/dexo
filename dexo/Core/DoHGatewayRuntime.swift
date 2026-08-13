@@ -77,7 +77,9 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
     }
 
     private static func gatewayLastErrorText() -> String {
-        let pointer = dexo_doh_gateway_last_error()
+        guard let pointer = dexo_doh_gateway_last_error() else {
+            return "DoH gateway failed to start"
+        }
         let text = String(cString: pointer)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "DoH gateway failed to start" : trimmed
