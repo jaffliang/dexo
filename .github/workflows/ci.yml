@@ -81,3 +81,26 @@ jobs:
           test -f "$manifest"
           plutil -lint "$manifest"
           cmp dexo/PrivacyInfo.xcprivacy "$manifest"
+
+      # Unsigned Debug IPA for PR sideloading. Push to main still uses
+      # build-ipa.yml (Release archive + GitHub Release).
+      - name: Package unsigned Debug IPA
+        if: github.event_name == 'pull_request'
+        run: |
+          APP="build/DerivedData/Build/Products/Debug-iphoneos/dexo.app"
+          test -d "$APP"
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build && zip -r dexo-unsigned-debug.ipa Payload
+          echo "Unsigned Debug IPA: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "### Unsigned Debug IPA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download \`dexo-unsigned-debug.ipa\` from this run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned Debug IPA
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dexo-unsigned-debug
+          path: build/dexo-unsigned-debug.ipa
+          retention-days: 7
+          if-no-files-found: error
