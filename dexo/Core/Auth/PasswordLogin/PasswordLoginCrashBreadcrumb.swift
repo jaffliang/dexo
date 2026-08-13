@@ -2,7 +2,8 @@ import Foundation
 import os.log
 
 /// Lightweight trail of password-login steps so a mid-flow crash can be pasted back.
-/// Stored in UserDefaults; never records passwords or full captcha tokens.
+/// Persisted to a fsynced Application Support file (and UserDefaults); never records
+/// passwords or full captcha tokens.
 nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     private static let defaultsKey = "password_login.crash_breadcrumb.v1"
     private static let log = OSLog(subsystem: Bundle.main.bundleIdentifier ?? "com.eilgnaw.dexo", category: "PasswordLogin")
@@ -47,6 +48,11 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     }
 
     static func beginFlow() {
+        // Keep the surviving trail until the last-crash copy UI is dismissed.
+        if DexoExceptionCatcher.readLastCrashReport()?.isEmpty == false {
+            record(.sessionStart, detail: "pending_crash_report")
+            return
+        }
         mutate { state in
             state = State(
                 startedAt: Date().timeIntervalSince1970,
@@ -107,10 +113,30 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
 
     /// Snapshot of the current trail for attaching to an NSException report.
     static func currentTrailForDiagnostics() -> String? {
-        queue.sync {
+        if let file = DexoExceptionCatcher.readBreadcrumbTrail(), !file.isEmpty {
+            return file
+        }
+        return queue.sync {
             let state = loadUnlocked()
             guard !state.events.isEmpty else { return nil }
             return format(state)
+        }
+    }
+
+    /// After the last-crash alert is copied or dismissed, don't re-offer this trail.
+    static func markCurrentTrailReported() {
+        queue.sync {
+            var state = loadUnlocked()
+            guard !state.events.isEmpty, !state.reported else { return }
+            state.reported = true
+            saveUnlocked(state)
+        }
+    }
+
+    static func resetForTesting() {
+        queue.sync {
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
+            DexoExceptionCatcher.clearBreadcrumbTrail()
         }
     }
 
@@ -158,6 +184,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
             UserDefaults.standard.set(data, forKey: defaultsKey)
             UserDefaults.standard.synchronize()
         }
+        DexoExceptionCatcher.writeBreadcrumbTrail(format(state))
     }
 
     private static func format(_ state: State) -> String {

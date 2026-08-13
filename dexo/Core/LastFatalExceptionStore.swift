@@ -1,20 +1,30 @@
 import Foundation
 import UIKit
 
-/// Reads `dexo.lastFatalException` written by `DexoExceptionCatcher` before abort.
+/// Reads the durable last-crash file written by `DexoExceptionCatcher` before abort.
+/// Falls back to `dexo.lastFatalException` UserDefaults from older builds.
 nonisolated enum LastFatalExceptionStore: Sendable {
     static let defaultsKey = "dexo.lastFatalException"
     private static let summaryKey = "dexo.lastFatalException.summary"
 
     static func peekReport() -> String? {
+        if var file = DexoExceptionCatcher.readLastCrashReport(), !file.isEmpty {
+            if !file.contains("-- breadcrumbs --"),
+               let trail = DexoExceptionCatcher.readBreadcrumbTrail(), !trail.isEmpty {
+                file += "\n-- breadcrumbs --\n\(trail)"
+            }
+            return file
+        }
         guard let payload = loadPayload() else { return nil }
         return format(payload)
     }
 
     static func clear() {
+        DexoExceptionCatcher.clearLastCrashReport()
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: defaultsKey)
         defaults.removeObject(forKey: summaryKey)
+        PasswordLoginCrashBreadcrumb.markCurrentTrailReported()
     }
 
     private struct Payload {
@@ -72,7 +82,11 @@ nonisolated enum LastFatalExceptionStore: Sendable {
             "name: \(payload.name.isEmpty ? "(empty)" : payload.name)",
             "reason: \(payload.reason.isEmpty ? "(empty — NSException.reason was nil)" : PasswordLoginCrashBreadcrumb.sanitizeForReport(payload.reason))",
         ]
-        if let trail = PasswordLoginCrashBreadcrumb.currentTrailForDiagnostics() {
+        if let trail = DexoExceptionCatcher.readBreadcrumbTrail(), !trail.isEmpty {
+            lines.append("")
+            lines.append("-- breadcrumbs --")
+            lines.append(trail)
+        } else if let trail = PasswordLoginCrashBreadcrumb.currentTrailForDiagnostics() {
             lines.append("")
             lines.append("-- breadcrumbs --")
             lines.append(trail)
@@ -99,8 +113,8 @@ enum LastFatalExceptionPresenter {
         guard LastFatalExceptionStore.peekReport() != nil else { return }
         let host = Self.topViewController(from: presenter)
         guard host.presentedViewController == nil else { return }
+        guard host.view.window != nil else { return }
         guard let report = LastFatalExceptionStore.peekReport() else { return }
-        isPresenting = true
 
         let alert = UIAlertController(
             title: String(localized: "password_login.debug.exception_title"),
@@ -116,7 +130,12 @@ enum LastFatalExceptionPresenter {
             LastFatalExceptionStore.clear()
             isPresenting = false
         })
-        host.present(alert, animated: true)
+        isPresenting = true
+        host.present(alert, animated: true) {
+            if host.presentedViewController !== alert {
+                isPresenting = false
+            }
+        }
     }
 
     private static func topViewController(from root: UIViewController) -> UIViewController {

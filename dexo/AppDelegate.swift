@@ -17,8 +17,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private var authChangeObserver: NSObjectProtocol?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Must run before any password-login / WebKit work so Jeff's next
-        // launch can copy exception.name + exception.reason (stripped IPAs omit both).
+        // Must run before any password-login / WebKit work so the next cold
+        // start can copy exception.name + reason from Application Support.
+        // SceneDelegate presents the copy UI once the first window is up.
         DexoExceptionCatcher.installUncaughtExceptionHandler()
 
         if !EncryptedDNSManager.shared.applyCurrentSettings() {

@@ -16,6 +16,23 @@ NS_ASSUME_NONNULL_BEGIN
                  inWebView:(WKWebView *)webView
                 completion:(void (^)(id _Nullable result, NSError * _Nullable error))completion;
 
+/// `Library/Application Support/dexo-last-crash.txt`
++ (NSURL *)lastCrashReportURL;
+
+/// Writes UTF-8 text with `fsync` so the report survives kill + relaunch.
++ (void)writeLastCrashReport:(NSString *)text;
+
++ (nullable NSString *)readLastCrashReport;
+
++ (void)clearLastCrashReport;
+
+/// Durable password-login breadcrumb trail, snapshotted into the crash file on abort.
++ (void)writeBreadcrumbTrail:(NSString *)text;
+
++ (nullable NSString *)readBreadcrumbTrail;
+
++ (void)clearBreadcrumbTrail;
+
 @end
 
 NS_ASSUME_NONNULL_END
