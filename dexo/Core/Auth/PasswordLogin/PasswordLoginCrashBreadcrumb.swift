@@ -65,7 +65,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     }
 
     static func record(_ step: Step, detail: String? = nil) {
-        let safeDetail = detail.map(sanitize)
+        let safeDetail = detail.map { sanitize($0) }
         let now = Date().timeIntervalSince1970
         mutate { state in
             if state.outcome != .inProgress, step != .teardown, step != .objcException {
