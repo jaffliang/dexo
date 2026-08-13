@@ -34,9 +34,12 @@ final class ExternalLinkOpenerTests: XCTestCase {
         )
     }
 
-    func testLinkTapKeepsNonFamilyOnSafariEvenWhenTExists() {
+    func testLinkTapUsesAuthenticatedWebViewForNonFamilyWhenTExists() {
         installLinuxDoToken()
-        XCTAssertEqual(ExternalLinkOpener.destinationForLinkTap(coee), .safari)
+        XCTAssertEqual(
+            ExternalLinkOpener.destinationForLinkTap(coee),
+            .authenticatedWebView
+        )
         XCTAssertEqual(
             ExternalLinkOpener.destinationForLinkTap(cdk),
             .authenticatedWebView
@@ -48,6 +51,10 @@ final class ExternalLinkOpenerTests: XCTestCase {
             ExternalLinkOpener.destinationForLinkTap(cdk),
             .missingSession
         )
+    }
+
+    func testLinkTapNonFamilyWithoutTUsesSafari() {
+        XCTAssertEqual(ExternalLinkOpener.destinationForLinkTap(coee), .safari)
     }
 
     private func installLinuxDoToken() {
