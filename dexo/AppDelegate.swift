@@ -17,6 +17,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private var authChangeObserver: NSObjectProtocol?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        DexoExceptionCatcher.installUncaughtExceptionHandler()
+
         if !EncryptedDNSManager.shared.applyCurrentSettings() {
             AppSettings.shared.dohEnabled = false
         }

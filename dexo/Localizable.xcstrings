@@ -3087,6 +3087,38 @@
         }
       }
     },
+    "password_login.debug.exception_hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A previous crash was captured. Tap to copy the exception."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已捕获上次崩溃。点此复制异常信息。"
+          }
+        }
+      }
+    },
+    "password_login.debug.exception_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last crash (NSException)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次崩溃（NSException）"
+          }
+        }
+      }
+    },
     "password_login.error.canceled" : {
       "localizations" : {
         "en" : {

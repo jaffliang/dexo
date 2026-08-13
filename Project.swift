@@ -41,6 +41,7 @@ let project = Project(
                     "dexo/AppIconOcean.icon/**",
                     "dexo/AppIconEmber.icon/**",
                     "dexo/AppIconForest.icon/**",
+                    "dexo/dexo-Bridging-Header.h",
                 ]),
             ],
             resources: .resources([
@@ -78,6 +79,7 @@ let project = Project(
                     "CURRENT_PROJECT_VERSION": "2",
                     "DEXO_PUSH_RELAY_HOST": .string(pushRelayHost),
                     "GENERATE_INFOPLIST_FILE": "YES",
+                    "HEADER_SEARCH_PATHS": "$(inherited) $(SRCROOT)/dexo $(SRCROOT)/dexo/Core",
                     "INFOPLIST_KEY_CFBundleDisplayName": "Dexo",
                     "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.utilities",
                     "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
@@ -91,6 +93,7 @@ let project = Project(
                     "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
                     "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
                     "SWIFT_EMIT_LOC_STRINGS": "YES",
+                    "SWIFT_OBJC_BRIDGING_HEADER": "dexo/dexo-Bridging-Header.h",
                     "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
                     "SWIFT_VERSION": "5.0",
                     "TARGETED_DEVICE_FAMILY": "1,2",

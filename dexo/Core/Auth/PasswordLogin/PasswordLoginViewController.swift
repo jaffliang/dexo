@@ -290,10 +290,6 @@ final class PasswordLoginViewController: BaseViewController {
         dismissLoginFlow()
     }
 
-    @objc private func debugBreadcrumbTapped() {
-        presentBreadcrumbAlert()
-    }
-
     @objc private func primaryTapped() {
         errorLabel.text = nil
         switch step {
@@ -383,7 +379,9 @@ final class PasswordLoginViewController: BaseViewController {
             lastCaptchaToken = token
             setBusy(true, status: String(localized: "password_login.status.signing_in"))
             // Let WebKit finish unwinding onPass / popup close before login JS.
-            await Task.yield()
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { cont.resume() }
+            }
             try await completeLogin(
                 session: session,
                 identifier: identifier,
@@ -508,6 +506,14 @@ final class PasswordLoginViewController: BaseViewController {
     }
 
     private func offerUnfinishedBreadcrumbIfNeeded() {
+        if LastFatalExceptionStore.peekReport() != nil {
+            debugBreadcrumbLabel.text = String(localized: "password_login.debug.exception_hint")
+            debugBreadcrumbLabel.isHidden = false
+            DispatchQueue.main.async { [weak self] in
+                LastFatalExceptionPresenter.presentIfNeeded(from: self)
+            }
+            return
+        }
         if !didOfferBreadcrumb, let trail = PasswordLoginCrashBreadcrumb.consumeUnfinishedTrail() {
             didOfferBreadcrumb = true
             lastUnfinishedBreadcrumb = trail
@@ -522,6 +528,14 @@ final class PasswordLoginViewController: BaseViewController {
             debugBreadcrumbLabel.text = String(localized: "password_login.debug.breadcrumb_hint")
             debugBreadcrumbLabel.isHidden = false
         }
+    }
+
+    @objc private func debugBreadcrumbTapped() {
+        if LastFatalExceptionStore.peekReport() != nil {
+            LastFatalExceptionPresenter.presentIfNeeded(from: self)
+            return
+        }
+        presentBreadcrumbAlert()
     }
 
     private func presentBreadcrumbAlert() {
@@ -544,7 +558,17 @@ final class PasswordLoginViewController: BaseViewController {
         let presented = captcha.navigationController ?? captcha
         guard presented.presentingViewController != nil, !presented.isBeingDismissed else { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            presented.dismiss(animated: true) {
+            do {
+                try DexoExceptionCatcher.runCatching {
+                    presented.dismiss(animated: true) {
+                        cont.resume()
+                    }
+                }
+            } catch {
+                PasswordLoginCrashBreadcrumb.record(
+                    .objcException,
+                    detail: "dismissCaptcha \(PasswordLoginCrashBreadcrumb.shortError(error))"
+                )
                 cont.resume()
             }
         }
@@ -554,10 +578,19 @@ final class PasswordLoginViewController: BaseViewController {
     private func dismissLoginFlow() {
         captchaViewController = nil
         let presenter = navigationController?.presentingViewController ?? presentingViewController
-        if let presenter {
-            presenter.dismiss(animated: true)
-        } else {
-            dismiss(animated: true)
+        do {
+            try DexoExceptionCatcher.runCatching {
+                if let presenter {
+                    presenter.dismiss(animated: true)
+                } else {
+                    self.dismiss(animated: true)
+                }
+            }
+        } catch {
+            PasswordLoginCrashBreadcrumb.record(
+                .objcException,
+                detail: "dismissLogin \(PasswordLoginCrashBreadcrumb.shortError(error))"
+            )
         }
     }
 }

@@ -20,6 +20,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         case exportCookies = "export_cookies"
         case loginViaWeb = "loginViaWeb"
         case teardown = "teardown"
+        case objcException = "objc_exception"
         case loginSuccess = "login_success"
         case canceled = "canceled"
         case error = "error"
@@ -61,7 +62,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         let safeDetail = detail.map(sanitize)
         let now = Date().timeIntervalSince1970
         mutate { state in
-            if state.outcome != .inProgress, step != .teardown {
+            if state.outcome != .inProgress, step != .teardown, step != .objcException {
                 return
             }
             state.events.append(Event(at: now, step: step.rawValue, detail: safeDetail))
@@ -104,6 +105,15 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         }
     }
 
+    /// Snapshot of the current trail for attaching to an NSException report.
+    static func currentTrailForDiagnostics() -> String? {
+        queue.sync {
+            let state = loadUnlocked()
+            guard !state.events.isEmpty else { return nil }
+            return format(state)
+        }
+    }
+
     static func redactToken(_ token: String) -> String {
         let count = token.count
         guard count > 8 else { return "len=\(count)" }
@@ -120,6 +130,10 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
             }
         }
         return clip(sanitize(error.localizedDescription), limit: 180)
+    }
+
+    static func sanitizeForReport(_ value: String) -> String {
+        sanitize(value)
     }
 
     private static func mutate(_ body: (inout State) -> Void) {
