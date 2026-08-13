@@ -253,8 +253,9 @@ final class PasswordLoginViewController: BaseViewController {
         tf.autocorrectionType = .no
         // `.username` / `.password` (and asciiCapable) pull the system
         // autofill keyboard and block third-party IMEs such as Sogou.
+        // `textContentType` is IUO: `.none` here is Optional.none (no UIKit `.none`).
         tf.keyboardType = .default
-        tf.textContentType = UITextContentType.none
+        tf.textContentType = nil
         tf.borderStyle = .none
         tf.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
         tf.leftViewMode = .always
@@ -277,7 +278,7 @@ final class PasswordLoginViewController: BaseViewController {
         }
         passwordField.isSecureTextEntry.toggle()
         passwordField.keyboardType = .default
-        passwordField.textContentType = UITextContentType.none
+        passwordField.textContentType = nil
         styleField(passwordField)
         updatePasswordToggleAppearance()
         if wasFirstResponder {
