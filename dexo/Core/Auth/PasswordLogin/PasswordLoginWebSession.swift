@@ -151,15 +151,21 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         completionHandler(.performDefaultHandling, nil)
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        DispatchQueue.main.async { [weak session] in
+            session?.handleNavigationFinished()
+        }
+    }
+
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         DispatchQueue.main.async { [weak session] in
-            session?.handleChallengeNavigationFailure(error)
+            session?.handleNavigationFailure(error)
         }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         DispatchQueue.main.async { [weak session] in
-            session?.handleChallengeNavigationFailure(error)
+            session?.handleNavigationFailure(error)
         }
     }
 }
@@ -184,6 +190,8 @@ final class PasswordLoginWebSession {
     private var readyTimeoutTask: Task<Void, Never>?
     private var challengeContinuation: CheckedContinuation<Void, Error>?
     private var clearancePollTask: Task<Void, Never>?
+    private var navigationContinuation: CheckedContinuation<Void, Error>?
+    private var originTimeoutTask: Task<Void, Never>?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -256,6 +264,10 @@ final class PasswordLoginWebSession {
             throw PasswordLoginError.unexpected(status: 0, phase: "captcha", body: "no webview")
         }
         webDelegate?.isChallengeMode = false
+        // loadHTMLString with only a baseURL is an opaque origin on WebKit;
+        // fetch('/session/csrf') then CORS-fails. Prime with a real same-origin
+        // navigation first (this forum's robots.txt), then inject captcha HTML.
+        try await navigateToSameOrigin()
         let hint = String(localized: "password_login.captcha_hint")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.readyContinuation = cont
@@ -270,6 +282,50 @@ final class PasswordLoginWebSession {
                 self?.takeReadyContinuation()?.resume(throwing: PasswordLoginError.captchaFailed)
             }
         }
+    }
+
+    /// Real `https://{forum-host}/robots.txt` navigation so the document origin
+    /// matches this forum (linux.do or idcflare.com — never a hardcoded host)
+    /// before captcha HTML is injected. Wait for `didFinish`, not just `load()`.
+    func navigateToSameOrigin() async throws {
+        guard let webView else {
+            throw PasswordLoginError.unexpected(status: 0, phase: "origin", body: "no webview")
+        }
+        let url = Self.originPrimeURL(for: baseURL)
+        PasswordLoginCrashBreadcrumb.record(.originPrime, detail: url.host.map { "\($0)\(url.path)" } ?? url.path)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                self.navigationContinuation = cont
+                webView.load(URLRequest(url: url))
+                originTimeoutTask?.cancel()
+                originTimeoutTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 25_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self?.takeNavigationContinuation()?.resume(
+                        throwing: PasswordLoginError.unexpected(
+                            status: 0,
+                            phase: "origin",
+                            body: "same-origin navigation timed out"
+                        )
+                    )
+                }
+            }
+        } catch {
+            originTimeoutTask?.cancel()
+            originTimeoutTask = nil
+            throw error
+        }
+        originTimeoutTask?.cancel()
+        originTimeoutTask = nil
+    }
+
+    /// Same-origin prime URL for this forum host. Never points idcflare at linux.do.
+    nonisolated static func originPrimeURL(for baseURL: URL) -> URL {
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) ?? URLComponents()
+        components.path = "/robots.txt"
+        components.query = nil
+        components.fragment = nil
+        return components.url ?? baseURL.appendingPathComponent("robots.txt")
     }
 
     func hasClearanceCookie() async -> Bool {
@@ -440,6 +496,8 @@ final class PasswordLoginWebSession {
         readyTimeoutTask = nil
         clearancePollTask?.cancel()
         clearancePollTask = nil
+        originTimeoutTask?.cancel()
+        originTimeoutTask = nil
         // Drop native callbacks first so an in-flight script message becomes a no-op.
         scriptBridge?.session = nil
         webDelegate?.session = nil
@@ -458,6 +516,7 @@ final class PasswordLoginWebSession {
         takeResultContinuation()?.resume(throwing: PasswordLoginError.canceled)
         takeCaptchaContinuation()?.resume(throwing: PasswordLoginError.canceled)
         takeChallengeContinuation()?.resume(throwing: PasswordLoginError.canceled)
+        takeNavigationContinuation()?.resume(throwing: PasswordLoginError.canceled)
         // Keep bridges alive until handlers are removed on the next turn.
         DispatchQueue.main.async {
             do {
@@ -559,9 +618,33 @@ final class PasswordLoginWebSession {
         return pending
     }
 
-    fileprivate func handleChallengeNavigationFailure(_ error: Error) {
+    private func takeNavigationContinuation() -> CheckedContinuation<Void, Error>? {
+        let pending = navigationContinuation
+        navigationContinuation = nil
+        return pending
+    }
+
+    fileprivate func handleNavigationFinished() {
+        originTimeoutTask?.cancel()
+        originTimeoutTask = nil
+        takeNavigationContinuation()?.resume()
+    }
+
+    fileprivate func handleNavigationFailure(_ error: Error) {
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        originTimeoutTask?.cancel()
+        originTimeoutTask = nil
+        if navigationContinuation != nil {
+            takeNavigationContinuation()?.resume(
+                throwing: PasswordLoginError.unexpected(
+                    status: 0,
+                    phase: "origin",
+                    body: error.localizedDescription
+                )
+            )
             return
         }
         guard challengeContinuation != nil else { return }
