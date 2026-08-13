@@ -97,18 +97,17 @@ extension WebCookieStore {
     }
 
     static func cookieEditorSameSite(for cookie: HTTPCookie) -> String {
+        // HTTPCookieStringPolicy is RawRepresentable; `.none` / `.lax` / `.strict`
+        // members are not available when compiling against the iOS 15 SDK.
         guard let policy = cookie.sameSitePolicy else { return "unspecified" }
-        switch policy {
-        case .none:
+        switch policy.rawValue.lowercased() {
+        case "none":
             return "no_restriction"
-        case .lax:
+        case "lax":
             return "lax"
-        case .strict:
+        case "strict":
             return "strict"
         default:
-            let raw = policy.rawValue.lowercased()
-            if raw == "none" { return "no_restriction" }
-            if raw == "lax" || raw == "strict" { return raw }
             return "unspecified"
         }
     }
