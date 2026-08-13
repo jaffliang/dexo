@@ -20,6 +20,8 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         case originPrime = "origin_prime"
         case loginJsStart = "login_js_start"
         case loginJsResult = "login_js_result"
+        case loginApiStart = "login_api_start"
+        case loginApiResult = "login_api_result"
         case exportCookies = "export_cookies"
         case loginViaWeb = "loginViaWeb"
         case teardown = "teardown"

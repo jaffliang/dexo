@@ -94,4 +94,33 @@ final class DoHGatewayPolicyTests: XCTestCase {
         )
         XCTAssertEqual(DoHGatewayPolicy.dohHost(from: "https://dns.google/dns-query"), "dns.google")
     }
+
+    func testRewrittenPOSTPreservesBodyAndForcesContentLength() throws {
+        let original = try XCTUnwrap(URL(string: "https://linux.do/session.json"))
+        var request = URLRequest(url: original)
+        request.httpMethod = "POST"
+        let body = Data("login=jeff&password=p%40ss".utf8)
+        request.httpBody = body
+        request.setValue("chunked", forHTTPHeaderField: "Transfer-Encoding")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        let rewritten = try XCTUnwrap(DoHGatewayPolicy.rewrittenRequest(request, configuration: active))
+        XCTAssertEqual(rewritten.httpBody, body)
+        XCTAssertEqual(rewritten.value(forHTTPHeaderField: "Content-Length"), String(body.count))
+        XCTAssertNil(rewritten.value(forHTTPHeaderField: "Transfer-Encoding"))
+        XCTAssertEqual(rewritten.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
+        XCTAssertEqual(rewritten.url?.path, "/session.json")
+    }
+
+    func testMaterializeHTTPBodyReadsStream() {
+        let body = Data("token=abc".utf8)
+        var request = URLRequest(url: URL(string: "https://linux.do/hcaptcha/create.json")!)
+        request.httpMethod = "POST"
+        request.httpBodyStream = InputStream(data: body)
+
+        let materialized = DoHGatewayPolicy.materializeHTTPBody(request)
+        XCTAssertEqual(materialized.httpBody, body)
+        XCTAssertEqual(materialized.value(forHTTPHeaderField: "Content-Length"), String(body.count))
+        XCTAssertNil(materialized.value(forHTTPHeaderField: "Transfer-Encoding"))
+    }
 }

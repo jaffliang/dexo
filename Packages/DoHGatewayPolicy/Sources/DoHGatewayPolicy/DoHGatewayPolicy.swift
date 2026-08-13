@@ -75,13 +75,53 @@ public enum DoHGatewayPolicy {
         components.port = configuration.gatewayPort
 
         guard let rewrittenURL = components.url else { return nil }
-        var rewritten = request
+        var rewritten = materializeHTTPBody(request)
         rewritten.url = rewrittenURL
         rewritten.setValue(originalHost, forHTTPHeaderField: upstreamHostHeader)
         rewritten.setValue(String(originalPort), forHTTPHeaderField: upstreamPortHeader)
         rewritten.setValue("https", forHTTPHeaderField: upstreamSchemeHeader)
         rewritten.setValue(originalHost, forHTTPHeaderField: "Host")
         return rewritten
+    }
+
+    /// URLSession often exposes `POST` bodies only as `httpBodyStream` inside
+    /// `URLProtocol`. The loopback gateway requires `Content-Length` and rejects
+    /// chunked requests, so login `/session.json` must be materialized here.
+    public static func materializeHTTPBody(_ request: URLRequest) -> URLRequest {
+        var copy = request
+        let body: Data
+        if let existing = copy.httpBody {
+            body = existing
+        } else if let stream = copy.httpBodyStream {
+            body = readHTTPBodyStream(stream)
+            copy.httpBody = body
+        } else {
+            return request
+        }
+        copy.setValue(nil, forHTTPHeaderField: "Transfer-Encoding")
+        copy.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+        return copy
+    }
+
+    private static func readHTTPBodyStream(_ stream: InputStream) -> Data {
+        if stream.streamStatus == .notOpen {
+            stream.open()
+        }
+        defer {
+            if stream.streamStatus != .closed {
+                stream.close()
+            }
+        }
+        var data = Data()
+        let bufferSize = 16 * 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufferSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
     }
 
     public static func isLoopbackHost(_ host: String) -> Bool {
