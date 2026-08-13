@@ -11,6 +11,7 @@ struct PasswordLoginConfig: Sendable {
     static let linuxDo = PasswordLoginConfig(
         host: "linux.do",
         hCaptchaSiteKey: "a776b4ac-8c4c-441e-986a-c6ee9ed8cf08",
+        // linux.do current path first, then Discourse's default. Keep both.
         hCaptchaCreateEndpoints: [
             "/captcha/hcaptcha/create.json",
             "/hcaptcha/create.json",

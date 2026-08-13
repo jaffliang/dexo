@@ -6,6 +6,7 @@ final class PasswordLoginCaptchaViewController: BaseViewController {
     override var backgroundStyle: BackgroundStyle { .grouped }
 
     var onClose: (() -> Void)?
+    var onChallengeDone: (() -> Void)?
 
     let webContainer: UIView = {
         let view = UIView()
@@ -101,6 +102,26 @@ final class PasswordLoginCaptchaViewController: BaseViewController {
         } else {
             spinner.stopAnimating()
         }
+    }
+
+    func setChallengeMode(_ enabled: Bool) {
+        title = enabled
+            ? String(localized: "challenge.title")
+            : String(localized: "password_login.captcha.title")
+        if enabled {
+            navigationItem.rightBarButtonItem = UIBarButtonItem(
+                title: String(localized: "challenge.done"),
+                style: .done,
+                target: self,
+                action: #selector(challengeDoneTapped)
+            )
+        } else {
+            navigationItem.rightBarButtonItem = nil
+        }
+    }
+
+    @objc private func challengeDoneTapped() {
+        onChallengeDone?()
     }
 
     private func applyCaptchaTheme() {

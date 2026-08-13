@@ -27,7 +27,7 @@ struct GuestContentLoadFailure {
 }
 
 /// Coalesces concurrent `challenge_required` failures into a single linux.do
-/// challenge sheet. Password-login still calls `presentAndWait` directly.
+/// challenge sheet. Password-login runs `/challenge` in its own WKWebView.
 enum GuestChallengePresenter {
     @MainActor
     private static var isPresenting = false

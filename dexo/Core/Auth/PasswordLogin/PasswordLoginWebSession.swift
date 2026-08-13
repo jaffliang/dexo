@@ -101,6 +101,9 @@ private nonisolated final class PasswordLoginScriptBridge: NSObject, WKScriptMes
 /// a MainActor-isolated session cannot hop without deadlock/crash.
 private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WKUIDelegate, WKNavigationDelegate, @unchecked Sendable {
     weak var session: PasswordLoginWebSession?
+    /// During in-place `/challenge`, `window.open` must stay in this WebView
+    /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
+    var isChallengeMode = false
 
     init(session: PasswordLoginWebSession) {
         self.session = session
@@ -114,6 +117,10 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
+        if isChallengeMode {
+            webView.load(navigationAction.request)
+            return nil
+        }
         // Must construct with WebKit's configuration on this thread and return
         // immediately. Do not hop to MainActor before the return.
         let popup = WKWebView(frame: .zero, configuration: configuration)
@@ -143,6 +150,18 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     ) {
         completionHandler(.performDefaultHandling, nil)
     }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        DispatchQueue.main.async { [weak session] in
+            session?.handleChallengeNavigationFailure(error)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        DispatchQueue.main.async { [weak session] in
+            session?.handleChallengeNavigationFailure(error)
+        }
+    }
 }
 
 /// WKWebView session that runs csrf → hCaptcha create → session.json with browser TLS.
@@ -163,6 +182,8 @@ final class PasswordLoginWebSession {
     private var captchaContinuation: CheckedContinuation<String, Error>?
     private var pendingCaptchaToken: String?
     private var readyTimeoutTask: Task<Void, Never>?
+    private var challengeContinuation: CheckedContinuation<Void, Error>?
+    private var clearancePollTask: Task<Void, Never>?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -173,8 +194,13 @@ final class PasswordLoginWebSession {
 
     func start(attachedTo presenter: UIViewController, embedIn container: UIView) async throws {
         let wkConfig = WKWebViewConfiguration()
-        wkConfig.websiteDataStore = .nonPersistent()
+        wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
+        // Skip DoH MITM so hCaptcha and csrf/session.json share the same
+        // direct TLS as in-place `/challenge` (no-op on iOS 15).
+        if #available(iOS 17.0, *) {
+            wkConfig.websiteDataStore.proxyConfigurations = []
+        }
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
         scriptBridge = bridge
@@ -186,9 +212,14 @@ final class PasswordLoginWebSession {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // Persist `__dexoPasswordLogin` across `/challenge` navigations so
+        // csrf → hCaptcha create → session.json stay in this WebView kernel.
+        controller.addUserScript(WKUserScript(
+            source: Self.loginJavaScript(config: config),
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
 
-        // Plain networking: skip DoH MITM for this session (no-op on iOS 15;
-        // hardening for iOS 17+ so hCaptcha does not go through the tunnel).
         let webDelegate = PasswordLoginWebViewDelegateBridge(session: self)
         self.webDelegate = webDelegate
 
@@ -218,17 +249,20 @@ final class PasswordLoginWebSession {
 
         self.webView = webView
         self.hostController = presenter
+    }
 
-        await WebCookieStore.shared.primeToWebView(
-            wkConfig.websiteDataStore,
-            for: baseURL,
-            excludingNames: WebCookieStore.discourseSessionCookieNames
-        )
-
+    func loadCaptchaPage() async throws {
+        guard let webView else {
+            throw PasswordLoginError.unexpected(status: 0, phase: "captcha", body: "no webview")
+        }
+        webDelegate?.isChallengeMode = false
         let hint = String(localized: "password_login.captcha_hint")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.readyContinuation = cont
-            webView.loadHTMLString(Self.makeHTML(config: config, captchaHint: hint), baseURL: baseURL)
+            webView.loadHTMLString(
+                Self.makeHTML(siteKey: config.hCaptchaSiteKey, captchaHint: hint),
+                baseURL: baseURL
+            )
             readyTimeoutTask?.cancel()
             readyTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 25_000_000_000)
@@ -238,13 +272,80 @@ final class PasswordLoginWebSession {
         }
     }
 
-    func reprimeCookies() async {
-        guard let webView else { return }
-        await WebCookieStore.shared.primeToWebView(
-            webView.configuration.websiteDataStore,
-            for: baseURL,
-            excludingNames: WebCookieStore.discourseSessionCookieNames
+    func hasClearanceCookie() async -> Bool {
+        guard let webView, let host = baseURL.host else { return false }
+        let cookies = await WebCookieStore.shared.exportCookies(
+            from: webView.configuration.websiteDataStore,
+            matchingHost: host
         )
+        return cookies.contains { $0.name == "cf_clearance" }
+    }
+
+    /// Loads `/challenge` in this session's WKWebView (same TLS kernel that
+    /// will run csrf / hCaptcha create / session.json). Does not present a
+    /// second `ChallengeViewController`.
+    func runInPlaceCloudflareChallenge(url: URL) async throws {
+        guard let webView else {
+            throw PasswordLoginError.unexpected(status: 0, phase: "cloudflare", body: "no webview")
+        }
+        PasswordLoginCrashBreadcrumb.record(.cloudflareInPlace)
+        readyTimeoutTask?.cancel()
+        readyTimeoutTask = nil
+        takeReadyContinuation()?.resume()
+
+        webDelegate?.isChallengeMode = true
+        WebCookieStore.shared.removeClearanceCookies(matching: url)
+        await WebCookieStore.shared.removeClearanceCookies(
+            from: webView.configuration.websiteDataStore,
+            matching: url
+        )
+
+        if let captchaHost = hostController as? PasswordLoginCaptchaViewController {
+            captchaHost.setChallengeMode(true)
+            captchaHost.onChallengeDone = { [weak self] in
+                self?.completeInPlaceChallengeFromUser()
+            }
+        }
+
+        defer {
+            webDelegate?.isChallengeMode = false
+            clearancePollTask?.cancel()
+            clearancePollTask = nil
+            if let captchaHost = hostController as? PasswordLoginCaptchaViewController {
+                captchaHost.onChallengeDone = nil
+                captchaHost.setChallengeMode(false)
+            }
+        }
+
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                self.challengeContinuation = cont
+                webView.load(URLRequest(url: url))
+                clearancePollTask?.cancel()
+                clearancePollTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        guard !Task.isCancelled else { return }
+                        await self?.finishInPlaceChallengeIfCleared()
+                    }
+                }
+            }
+        } catch {
+            if case PasswordLoginError.canceled = error {
+                throw error
+            }
+            throw error
+        }
+
+        dismissAllPopups()
+        await syncWebSessionToNativeJar()
+        guard await hasClearanceCookie() else {
+            throw PasswordLoginError.cloudflareFailed
+        }
+    }
+
+    func completeInPlaceChallengeFromUser() {
+        Task { await self.finishInPlaceChallengeIfCleared(force: true) }
     }
 
     func runLogin(
@@ -258,8 +359,10 @@ final class PasswordLoginWebSession {
         let pwJS = Self.jsString(password)
         let captchaJS = hCaptchaToken.map(Self.jsString) ?? "null"
         let totpJS = secondFactorToken.map(Self.jsString) ?? "null"
-        // Do not return the async function's Promise: iOS 15 evaluateJavaScript
-        // cannot convert it to ObjC (执行JavaScript返回结果的类型不受支持).
+        // Fire-and-forget only. Do not evaluate the async function source here:
+        // iOS 15 cannot bridge a Promise (`执行JavaScript返回结果的类型不受支持`).
+        // That WKError is not CSRF — `__dexoPasswordLogin` is a WKUserScript and
+        // reports via dexoPasswordLogin. A separate evaluate fix voids the Promise.
         let script = PasswordLoginJavaScriptEvaluate.invocationScript(
             identifierJS: idJS,
             passwordJS: pwJS,
@@ -275,8 +378,8 @@ final class PasswordLoginWebSession {
                 self.resultContinuation = cont
                 DexoExceptionCatcher.evaluateJavaScript(script, in: webView) { [weak self] _, error in
                     guard let error else { return }
-                    // Login result arrives only via dexoPasswordLogin. A Promise
-                    // conversion error is a false failure — keep waiting.
+                    // Promise-bridge false failure on iOS 15. Not Cloudflare/CSRF;
+                    // keep waiting for dexoPasswordLogin.
                     if PasswordLoginJavaScriptEvaluate.isUnsupportedResultType(error) {
                         return
                     }
@@ -334,6 +437,8 @@ final class PasswordLoginWebSession {
         PasswordLoginCrashBreadcrumb.record(.teardown)
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
+        clearancePollTask?.cancel()
+        clearancePollTask = nil
         // Drop native callbacks first so an in-flight script message becomes a no-op.
         scriptBridge?.session = nil
         webDelegate?.session = nil
@@ -351,6 +456,7 @@ final class PasswordLoginWebSession {
         takeReadyContinuation()?.resume(throwing: PasswordLoginError.canceled)
         takeResultContinuation()?.resume(throwing: PasswordLoginError.canceled)
         takeCaptchaContinuation()?.resume(throwing: PasswordLoginError.canceled)
+        takeChallengeContinuation()?.resume(throwing: PasswordLoginError.canceled)
         // Keep bridges alive until handlers are removed on the next turn.
         DispatchQueue.main.async {
             do {
@@ -446,6 +552,51 @@ final class PasswordLoginWebSession {
         return pending
     }
 
+    private func takeChallengeContinuation() -> CheckedContinuation<Void, Error>? {
+        let pending = challengeContinuation
+        challengeContinuation = nil
+        return pending
+    }
+
+    fileprivate func handleChallengeNavigationFailure(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        guard challengeContinuation != nil else { return }
+        takeChallengeContinuation()?.resume(
+            throwing: PasswordLoginError.unexpected(
+                status: 0,
+                phase: "cloudflare",
+                body: error.localizedDescription
+            )
+        )
+    }
+
+    fileprivate func finishInPlaceChallengeIfCleared(force: Bool = false) async {
+        guard challengeContinuation != nil else { return }
+        if force {
+            takeChallengeContinuation()?.resume()
+            return
+        }
+        guard await hasClearanceCookie() else { return }
+        takeChallengeContinuation()?.resume()
+    }
+
+    private func syncWebSessionToNativeJar() async {
+        guard let webView else { return }
+        await WebCookieStore.shared.syncFromWebView(
+            webView.configuration.websiteDataStore,
+            for: baseURL
+        )
+        if let evaluatedUserAgent = try? await webView.evaluateJavaScript("navigator.userAgent") as? String,
+           !evaluatedUserAgent.isEmpty
+        {
+            WebCookieStore.shared.userAgent = evaluatedUserAgent
+            webView.customUserAgent = evaluatedUserAgent
+        }
+    }
+
     fileprivate func attachPopupSafely(_ popup: WKWebView, over parent: WKWebView) {
         catching("attachPopup") {
             self.attachPopup(popup, over: parent)
@@ -519,9 +670,77 @@ final class PasswordLoginWebSession {
         JavaScriptJSONString.encode(value)
     }
 
-    private static func makeHTML(config: PasswordLoginConfig, captchaHint: String) -> String {
+    /// Discourse csrf → hCaptcha create → session.json. Injected as a user
+    /// script so it survives in-place `/challenge` navigation. Fetches use
+    /// `credentials: 'include'` and never set Cookie / User-Agent / Origin.
+    nonisolated static func loginJavaScript(config: PasswordLoginConfig) -> String {
         let endpointsJSON = (try? String(data: JSONEncoder().encode(config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"
-        let siteKey = config.hCaptchaSiteKey
+        return """
+        window.__dexoPasswordLogin = async function(identifier, password, hcaptchaToken, secondFactorToken) {
+          function post(name, payload) {
+            try { window.webkit.messageHandlers[name].postMessage(payload); } catch (e) {}
+          }
+          function done(p) { post('dexoPasswordLogin', p); }
+          try {
+            var c = await fetch('/session/csrf', {
+              method: 'GET',
+              headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+              credentials: 'include',
+              cache: 'no-store'
+            });
+            if (c.status !== 200) { return done({ phase: 'csrf', status: c.status, body: await c.text() }); }
+            var csrf = (await c.json()).csrf;
+            if (hcaptchaToken) {
+              var endpoints = \(endpointsJSON);
+              var last = null;
+              var ok = false;
+              for (var i = 0; i < endpoints.length; i++) {
+                try {
+                  var h = await fetch(endpoints[i], {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                      'Content-Type': 'application/x-www-form-urlencoded',
+                      'X-CSRF-Token': csrf,
+                      'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: 'token=' + encodeURIComponent(hcaptchaToken)
+                  });
+                  last = { endpoint: endpoints[i], status: h.status, body: await h.text() };
+                  if (h.status === 200) { ok = true; break; }
+                  if (h.status !== 404) break;
+                } catch (e) {
+                  last = { endpoint: endpoints[i], status: 0, body: String(e) };
+                }
+              }
+              if (!ok) {
+                return done({ phase: 'hcaptcha', status: last ? last.status : 0, body: JSON.stringify(last) });
+              }
+            }
+            var form = 'login=' + encodeURIComponent(identifier) + '&password=' + encodeURIComponent(password);
+            if (secondFactorToken) {
+              form += '&second_factor_token=' + encodeURIComponent(secondFactorToken) + '&second_factor_method=1';
+            }
+            var s = await fetch('/session.json', {
+              method: 'POST',
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRF-Token': csrf,
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+              },
+              body: form
+            });
+            return done({ phase: 'session', status: s.status, body: await s.text() });
+          } catch (e) {
+            return done({ phase: 'exception', status: 0, body: String(e) });
+          }
+        };
+        """
+    }
+
+    private static func makeHTML(siteKey: String, captchaHint: String) -> String {
         let hintHTML = captchaHint
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -574,64 +793,6 @@ final class PasswordLoginWebSession {
             document.addEventListener('DOMContentLoaded', function() {
               post('dexoPasswordLoginReady', 'ready');
             });
-            window.__dexoPasswordLogin = async function(identifier, password, hcaptchaToken, secondFactorToken) {
-              function done(p) { post('dexoPasswordLogin', p); }
-              try {
-                var c = await fetch('/session/csrf', {
-                  method: 'GET',
-                  headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
-                  credentials: 'include',
-                  cache: 'no-store'
-                });
-                if (c.status !== 200) { return done({ phase: 'csrf', status: c.status, body: await c.text() }); }
-                var csrf = (await c.json()).csrf;
-                if (hcaptchaToken) {
-                  var endpoints = \(endpointsJSON);
-                  var last = null;
-                  var ok = false;
-                  for (var i = 0; i < endpoints.length; i++) {
-                    try {
-                      var h = await fetch(endpoints[i], {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                          'Content-Type': 'application/x-www-form-urlencoded',
-                          'X-CSRF-Token': csrf,
-                          'X-Requested-With': 'XMLHttpRequest'
-                        },
-                        body: 'token=' + encodeURIComponent(hcaptchaToken)
-                      });
-                      last = { endpoint: endpoints[i], status: h.status, body: await h.text() };
-                      if (h.status === 200) { ok = true; break; }
-                      if (h.status !== 404) break;
-                    } catch (e) {
-                      last = { endpoint: endpoints[i], status: 0, body: String(e) };
-                    }
-                  }
-                  if (!ok) {
-                    return done({ phase: 'hcaptcha', status: last ? last.status : 0, body: JSON.stringify(last) });
-                  }
-                }
-                var form = 'login=' + encodeURIComponent(identifier) + '&password=' + encodeURIComponent(password);
-                if (secondFactorToken) {
-                  form += '&second_factor_token=' + encodeURIComponent(secondFactorToken) + '&second_factor_method=1';
-                }
-                var s = await fetch('/session.json', {
-                  method: 'POST',
-                  credentials: 'include',
-                  headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-CSRF-Token': csrf,
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Accept': 'application/json'
-                  },
-                  body: form
-                });
-                return done({ phase: 'session', status: s.status, body: await s.text() });
-              } catch (e) {
-                return done({ phase: 'exception', status: 0, body: String(e) });
-              }
-            };
           </script>
           <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
         </body>
@@ -639,4 +800,5 @@ final class PasswordLoginWebSession {
         """
     }
 }
+
 
