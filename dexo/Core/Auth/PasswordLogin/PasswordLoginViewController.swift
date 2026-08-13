@@ -324,8 +324,6 @@ final class PasswordLoginViewController: BaseViewController {
         setBusy(true, status: String(localized: "password_login.status.cloudflare"))
 
         do {
-            try await CloudflareClearanceGate.ensureClearance(for: forum, config: config, from: self)
-            setBusy(true, status: String(localized: "password_login.status.captcha"))
             try await presentCaptchaAndLogin(identifier: identifier, password: password)
         } catch PasswordLoginError.canceled {
             PasswordLoginCrashBreadcrumb.finishCanceled()
@@ -375,6 +373,12 @@ final class PasswordLoginViewController: BaseViewController {
 
         do {
             try await session.start(attachedTo: captchaVC, embedIn: captchaVC.webContainer)
+            if let challengeURL = config.challengeURL, !(await session.hasClearanceCookie()) {
+                setBusy(true, status: String(localized: "password_login.status.cloudflare"))
+                try await session.runInPlaceCloudflareChallenge(url: challengeURL)
+            }
+            setBusy(true, status: String(localized: "password_login.status.captcha"))
+            try await session.loadCaptchaPage()
             setBusy(true, status: String(localized: "password_login.status.captcha_wait"))
 
             let token = try await session.waitForCaptchaToken()
@@ -415,14 +419,14 @@ final class PasswordLoginViewController: BaseViewController {
         case "csrf" where result.status == 403 && !didRetryCF:
             didRetryCF = true
             setBusy(true, status: String(localized: "password_login.status.cloudflare_retry"))
-            let presenter = presentedViewController ?? self
-            try await CloudflareClearanceGate.ensureClearance(
-                for: forum,
-                config: config,
-                from: presenter,
-                force: true
-            )
-            try await session.reprimeCookies()
+            guard let challengeURL = config.challengeURL else {
+                throw PasswordLoginError.unexpected(
+                    status: result.status,
+                    phase: result.phase,
+                    body: result.body
+                )
+            }
+            try await session.runInPlaceCloudflareChallenge(url: challengeURL)
             try await completeLogin(
                 session: session,
                 identifier: identifier,
@@ -431,12 +435,15 @@ final class PasswordLoginViewController: BaseViewController {
                 secondFactor: secondFactor
             )
             return
-        case "csrf":
-            throw PasswordLoginError.csrfBlocked
-        case "hcaptcha":
-            throw PasswordLoginError.captchaFailed
+        case "csrf", "hcaptcha", "exception":
+            throw PasswordLoginError.unexpected(
+                status: result.status,
+                phase: result.phase,
+                body: result.body
+            )
         case "session":
-            if looksLikeSecondFactor(result.body), secondFactor == nil {
+            switch PasswordLoginSessionResponse.interpret(status: result.status, body: result.body) {
+            case .needsSecondFactor where secondFactor == nil:
                 let code = try await promptSecondFactor()
                 try await completeLogin(
                     session: session,
@@ -446,8 +453,11 @@ final class PasswordLoginViewController: BaseViewController {
                     secondFactor: code
                 )
                 return
-            }
-            if result.status == 200 {
+            case .needsSecondFactor:
+                throw PasswordLoginError.secondFactorFailed
+            case .invalidCredentials:
+                throw PasswordLoginError.invalidCredentials
+            case .signedIn:
                 let exported = try await session.exportSessionCookies()
                 PasswordLoginCrashBreadcrumb.record(.loginViaWeb)
                 try await authManager.loginViaWeb(
@@ -461,22 +471,12 @@ final class PasswordLoginViewController: BaseViewController {
                 onFinished?(.success(()))
                 dismissLoginFlow()
                 return
+            case .failed(let status, let body):
+                throw PasswordLoginError.unexpected(status: status, phase: result.phase, body: body)
             }
-            if result.status == 401 || result.status == 422 {
-                throw PasswordLoginError.invalidCredentials
-            }
-            throw PasswordLoginError.unexpected(status: result.status, phase: result.phase, body: result.body)
         default:
             throw PasswordLoginError.unexpected(status: result.status, phase: result.phase, body: result.body)
         }
-    }
-
-    private func looksLikeSecondFactor(_ body: String) -> Bool {
-        let lower = body.lowercased()
-        return lower.contains("second_factor")
-            || lower.contains("two_factor")
-            || lower.contains("totp")
-            || lower.contains("second factor")
     }
 
     private func promptSecondFactor() async throws -> String {

@@ -173,6 +173,13 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertTrue(remaining.contains("_t"))
     }
 
+    @MainActor
+    func testWebsiteDataStoreIsSharedSingletonJar() {
+        let first = WebCookieStore.shared.websiteDataStore
+        let second = WebCookieStore.shared.websiteDataStore
+        XCTAssertTrue(first === second)
+    }
+
     private func cookieHeaderCount(in request: URLRequest) -> Int {
         request.allHTTPHeaderFields?.keys.filter { $0.caseInsensitiveCompare("Cookie") == .orderedSame }.count ?? 0
     }

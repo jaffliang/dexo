@@ -60,6 +60,7 @@ final class ChallengeViewController: BaseViewController {
 
     private func makeWebViewConfiguration() async throws -> (WKWebViewConfiguration, AnyObject?) {
         let config = WKWebViewConfiguration()
+        config.websiteDataStore = WebCookieStore.shared.websiteDataStore
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let darkModeCSS = WKUserScript(
@@ -68,7 +69,9 @@ final class ChallengeViewController: BaseViewController {
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(darkModeCSS)
-        let lease = try await WebViewDoHConfigurator.configure(config)
+        // Keep the shared store; replacing it with `.default()` would split
+        // TLS/JA3 from password-login fetches that reuse this jar.
+        let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(config)
         return (config, lease)
     }
 

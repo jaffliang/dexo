@@ -16,6 +16,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         case popupClose = "popup_close"
         case captchaToken = "captcha_token"
         case captchaError = "captcha_error"
+        case cloudflareInPlace = "cloudflare_in_place"
         case loginJsStart = "login_js_start"
         case loginJsResult = "login_js_result"
         case exportCookies = "export_cookies"

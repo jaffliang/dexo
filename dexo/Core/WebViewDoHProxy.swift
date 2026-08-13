@@ -23,8 +23,8 @@ enum WebViewDoHConfigurator {
     }
 
     /// Applies the DoH CONNECT proxy to whatever data store the caller already
-    /// attached (e.g. a non-persistent jar for password login), without
-    /// replacing it with the shared default store.
+    /// attached (e.g. the shared Cloudflare / password-login jar), without
+    /// replacing it with `.default()`.
     static func configurePreservingDataStore(
         _ configuration: WKWebViewConfiguration
     ) async throws -> AnyObject? {

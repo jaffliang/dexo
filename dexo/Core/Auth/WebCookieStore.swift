@@ -15,6 +15,12 @@ final class WebCookieStore {
         didSet { saveUserAgent() }
     }
 
+    /// Long-lived WebKit jar shared by Cloudflare challenge and password-login
+    /// WKWebViews. Copying `cf_clearance` into a fresh `.nonPersistent()` store
+    /// does not preserve TLS/JA3, so both flows must use this instance.
+    @MainActor
+    private(set) lazy var websiteDataStore: WKWebsiteDataStore = .nonPersistent()
+
     private let userAgentPath: URL
 
     private init() {
