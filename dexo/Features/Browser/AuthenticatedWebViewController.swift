@@ -243,7 +243,7 @@ final class AuthenticatedWebViewController: BaseViewController {
         popup.customUserAgent = parent.customUserAgent
         popup.isOpaque = false
         popup.backgroundColor = ThemeManager.shared.cardBackgroundColor
-        let host = parent.superview ?? view
+        let host: UIView = parent.superview ?? view
         host.addSubview(popup)
         popup.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
