@@ -3119,6 +3119,54 @@
         }
       }
     },
+    "password_login.debug.copy_hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap to copy the last login error (phase, status, details)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点此复制上次登录错误（阶段、状态、详情）。"
+          }
+        }
+      }
+    },
+    "password_login.debug.error_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last login error"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次登录错误"
+          }
+        }
+      }
+    },
+    "password_login.debug.truncated" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "…(truncated, full text copied)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "…（已截断，完整内容已复制）"
+          }
+        }
+      }
+    },
     "password_login.debug.exception_hint" : {
       "localizations" : {
         "en" : {
@@ -3291,6 +3339,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "出了点问题，请重试。"
+          }
+        }
+      }
+    },
+    "password_login.error.unexpected %@ %@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Login failed (phase=%1$@ status=%2$@). %3$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录失败（阶段=%1$@ 状态=%2$@）。%3$@"
           }
         }
       }

@@ -17,15 +17,27 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         #if DEBUG
         FPSOverlay.shared.install(on: windowScene)
         #endif
+
+        scheduleLastCrashPresentation()
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {}
     func sceneDidBecomeActive(_ scene: UIScene) {
+        scheduleLastCrashPresentation()
+    }
+
+    /// Copyable last-crash alert on cold start — does not require opening password login.
+    /// The file is not deleted until Copy or OK.
+    private func scheduleLastCrashPresentation() {
         guard let root = window?.rootViewController else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        DispatchQueue.main.async {
             LastFatalExceptionPresenter.presentIfNeeded(from: root)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            LastFatalExceptionPresenter.presentIfNeeded(from: self?.window?.rootViewController)
+        }
     }
+
     func sceneWillResignActive(_ scene: UIScene) {}
     func sceneWillEnterForeground(_ scene: UIScene) {
 //        ProxyManager.shared.start()

@@ -2,7 +2,8 @@ import Foundation
 import os.log
 
 /// Lightweight trail of password-login steps so a mid-flow crash can be pasted back.
-/// Stored in UserDefaults; never records passwords or full captcha tokens.
+/// Persisted to a fsynced Application Support file (and UserDefaults); never records
+/// passwords or full captcha tokens.
 nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     private static let defaultsKey = "password_login.crash_breadcrumb.v1"
     private static let log = OSLog(subsystem: Bundle.main.bundleIdentifier ?? "com.eilgnaw.dexo", category: "PasswordLogin")
@@ -47,6 +48,11 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     }
 
     static func beginFlow() {
+        // Keep the surviving trail until the last-crash copy UI is dismissed.
+        if DexoExceptionCatcher.readLastCrashReport()?.isEmpty == false {
+            record(.sessionStart, detail: "pending_crash_report")
+            return
+        }
         mutate { state in
             state = State(
                 startedAt: Date().timeIntervalSince1970,
@@ -59,7 +65,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     }
 
     static func record(_ step: Step, detail: String? = nil) {
-        let safeDetail = detail.map(sanitize)
+        let safeDetail = detail.map { sanitize($0) }
         let now = Date().timeIntervalSince1970
         mutate { state in
             if state.outcome != .inProgress, step != .teardown, step != .objcException {
@@ -107,10 +113,30 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
 
     /// Snapshot of the current trail for attaching to an NSException report.
     static func currentTrailForDiagnostics() -> String? {
-        queue.sync {
+        if let file = DexoExceptionCatcher.readBreadcrumbTrail(), !file.isEmpty {
+            return file
+        }
+        return queue.sync {
             let state = loadUnlocked()
             guard !state.events.isEmpty else { return nil }
             return format(state)
+        }
+    }
+
+    /// After the last-crash alert is copied or dismissed, don't re-offer this trail.
+    static func markCurrentTrailReported() {
+        queue.sync {
+            var state = loadUnlocked()
+            guard !state.events.isEmpty, !state.reported else { return }
+            state.reported = true
+            saveUnlocked(state)
+        }
+    }
+
+    static func resetForTesting() {
+        queue.sync {
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
+            DexoExceptionCatcher.clearBreadcrumbTrail()
         }
     }
 
@@ -129,11 +155,36 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
                 return String(describing: login)
             }
         }
+        let ns = error as NSError
+        if ns.userInfo["exception.name"] != nil {
+            return clip(exceptionDiagnostic(error), limit: 180)
+        }
         return clip(sanitize(error.localizedDescription), limit: 180)
     }
 
-    static func sanitizeForReport(_ value: String) -> String {
-        sanitize(value)
+    /// Name + reason (+ a few stack frames) from `DexoExceptionCatcher` NSError userInfo.
+    static func exceptionDiagnostic(_ error: Error) -> String {
+        let ns = error as NSError
+        var parts: [String] = []
+        if let name = ns.userInfo["exception.name"] as? String, !name.isEmpty {
+            parts.append("name=\(name)")
+        }
+        let reason = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !reason.isEmpty {
+            parts.append(sanitize(reason, limit: 400))
+        }
+        if let stack = ns.userInfo["exception.stack"] as? String, !stack.isEmpty {
+            let frames = stack.split(separator: "\n", omittingEmptySubsequences: false).prefix(12).joined(separator: " | ")
+            parts.append("stack=\(frames)")
+        }
+        if parts.isEmpty {
+            return clip(sanitize(String(describing: error)), limit: 400)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    static func sanitizeForReport(_ value: String, limit: Int = 240) -> String {
+        sanitize(value, limit: limit)
     }
 
     private static func mutate(_ body: (inout State) -> Void) {
@@ -158,6 +209,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
             UserDefaults.standard.set(data, forKey: defaultsKey)
             UserDefaults.standard.synchronize()
         }
+        DexoExceptionCatcher.writeBreadcrumbTrail(format(state))
     }
 
     private static func format(_ state: State) -> String {
@@ -185,7 +237,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         #endif
     }
 
-    private static func sanitize(_ value: String) -> String {
+    private static func sanitize(_ value: String, limit: Int = 240) -> String {
         var text = value
         let passwordKeys = ["password", "passwd", "second_factor_token"]
         for key in passwordKeys {
@@ -198,7 +250,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
                 )
             }
         }
-        return clip(text.replacingOccurrences(of: "\n", with: " "), limit: 240)
+        return clip(text.replacingOccurrences(of: "\n", with: " "), limit: limit)
     }
 
     private static func clip(_ value: String, limit: Int) -> String {
