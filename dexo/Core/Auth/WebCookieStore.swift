@@ -190,6 +190,12 @@ final class WebCookieStore {
 
     // MARK: - Persistence
 
+    func jarIdentities() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(jar.keys)
+    }
+
     private func key(for cookie: HTTPCookie) -> String {
         "\(cookie.domain)|\(cookie.name)|\(cookie.path)"
     }

@@ -1,6 +1,5 @@
 import CookedHTML
 import Lightbox
-import SafariServices
 import SDWebImage
 import UIKit
 
@@ -1768,13 +1767,13 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
 private extension VirtualizedTopicDetailViewController {
     func handleLink(_ url: URL) {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            UIApplication.shared.open(url)
+            ExternalLinkOpener.open(url, from: self)
             return
         }
         guard let baseHost = URL(string: baseURL)?.host,
               url.host?.caseInsensitiveCompare(baseHost) == .orderedSame
         else {
-            present(SFSafariViewController(url: url), animated: true)
+            ExternalLinkOpener.open(url, from: self)
             return
         }
 
@@ -1801,7 +1800,7 @@ private extension VirtualizedTopicDetailViewController {
                 animated: true
             )
         } else {
-            present(SFSafariViewController(url: url), animated: true)
+            ExternalLinkOpener.open(url, from: self)
         }
     }
 

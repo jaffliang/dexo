@@ -32,6 +32,34 @@ enum ForumPolicy {
         matches(baseURL: baseURL, hosts: linuxDoFamilyHosts)
     }
 
+    static func isLinuxDoFamily(url: URL) -> Bool {
+        guard let host = url.host else { return false }
+        return linuxDoFamilyRegistrableHost(forHost: host) != nil
+    }
+
+    /// `linux.do` or `idcflare.com` when `host` is that site or a subdomain.
+    static func linuxDoFamilyRegistrableHost(forHost host: String) -> String? {
+        let host = host.lowercased()
+        return linuxDoFamilyHosts.first { host == $0 || host.hasSuffix(".\($0)") }
+    }
+
+    /// Default URL for the in-app browser prompt. linux.do defaults to CDK
+    /// because that site's login UI is incompatible with iOS 15.
+    static func defaultInAppBrowserURL(for baseURL: String) -> URL? {
+        guard let forumURL = URL(string: baseURL),
+              let host = forumURL.host,
+              let registrable = linuxDoFamilyRegistrableHost(forHost: host)
+        else { return URL(string: baseURL) }
+        if registrable == "linux.do" {
+            return URL(string: "https://cdk.linux.do/")
+        }
+        var components = URLComponents()
+        components.scheme = forumURL.scheme ?? "https"
+        components.host = host
+        components.path = "/"
+        return components.url
+    }
+
     /// linux.do-only circuit breaker for `/topics/timings`. Do not reuse the
     /// family set: flipping `linuxDoReadTimingsEnabled` while browsing
     /// idcflare would clobber the linux.do setting.

@@ -1,5 +1,4 @@
 import CookedHTML
-import SafariServices
 import UIKit
 
 private nonisolated enum ReplyItem: Hashable, Sendable {
@@ -328,13 +327,7 @@ extension RepliesViewController: PostCellDelegate {
     }
 
     private func openExternalURL(_ url: URL) {
-        let scheme = url.scheme?.lowercased()
-        if scheme == "http" || scheme == "https" {
-            let safari = SFSafariViewController(url: url)
-            present(safari, animated: true)
-        } else {
-            UIApplication.shared.open(url)
-        }
+        ExternalLinkOpener.open(url, from: self)
     }
 
     func postCell(didTapShowRepliesForPostId postId: Int) {

@@ -16,13 +16,7 @@ extension WebCookieStore {
         for url: URL,
         excludingNames: Set<String> = []
     ) async {
-        let source = cookies(for: url).filter { !excludingNames.contains($0.name) }
-        let store = dataStore.httpCookieStore
-        for cookie in source {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                store.setCookie(cookie) { cont.resume() }
-            }
-        }
+        await prime(into: dataStore, for: url, excludingNames: excludingNames)
     }
 
     @MainActor

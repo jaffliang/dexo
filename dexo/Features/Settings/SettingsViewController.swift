@@ -381,7 +381,7 @@ extension SettingsViewController: UITableViewDelegate {
             navigationController?.pushViewController(vc, animated: true)
         case .about:
             if let url = URL(string: "https://github.com/Eilgnaw/dexo") {
-                UIApplication.shared.open(url)
+                ExternalLinkOpener.open(url, from: self)
             }
         case .network:
             let viewController = DoHSettingsViewController()
