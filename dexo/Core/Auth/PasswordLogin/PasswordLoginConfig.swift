@@ -43,6 +43,11 @@ struct PasswordLoginConfig: Sendable {
     static func supportsPasswordLogin(for baseURL: String) -> Bool {
         config(for: baseURL) != nil
     }
+
+    /// Host interpolated into `password_login.subtitle`. Prefers the forum URL.
+    func subtitleHost(for baseURL: String) -> String {
+        URL(string: baseURL)?.host ?? host
+    }
 }
 
 enum PasswordLoginError: Error, LocalizedError {

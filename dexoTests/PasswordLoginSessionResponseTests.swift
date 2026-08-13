@@ -130,6 +130,16 @@ final class PasswordLoginSessionResponseTests: XCTestCase {
 }
 
 final class PasswordLoginErrorTests: XCTestCase {
+    func testSubtitleFormatUsesForumHostNotHardcodedLinuxDo() {
+        let linux = String(localized: "password_login.subtitle \("linux.do")")
+        XCTAssertTrue(linux.contains("linux.do"), linux)
+        XCTAssertFalse(linux.contains("idcflare.com"), linux)
+
+        let idcflare = String(localized: "password_login.subtitle \("idcflare.com")")
+        XCTAssertTrue(idcflare.contains("idcflare.com"), idcflare)
+        XCTAssertFalse(idcflare.contains("linux.do"), idcflare)
+    }
+
     func testUnexpectedDescriptionIncludesPhaseStatusAndBody() {
         let error = PasswordLoginError.unexpected(
             status: 403,
@@ -209,6 +219,21 @@ final class PasswordLoginJavaScriptProtocolTests: XCTestCase {
         XCTAssertNotNil(PasswordLoginConfig.config(for: "https://www.idcflare.com"))
         XCTAssertTrue(PasswordLoginConfig.supportsPasswordLogin(for: "https://idcflare.com/"))
         XCTAssertNil(PasswordLoginConfig.config(for: "https://example.com"))
+    }
+
+    func testSubtitleHostUsesForumURLThenConfigHost() {
+        XCTAssertEqual(
+            PasswordLoginConfig.linuxDo.subtitleHost(for: "https://linux.do"),
+            "linux.do"
+        )
+        XCTAssertEqual(
+            PasswordLoginConfig.idcflare.subtitleHost(for: "https://idcflare.com/"),
+            "idcflare.com"
+        )
+        XCTAssertEqual(
+            PasswordLoginConfig.idcflare.subtitleHost(for: "not-a-url"),
+            "idcflare.com"
+        )
     }
 
     func testLoginJavaScriptUsesCredentialsIncludeWithoutManualCookieHeaders() {

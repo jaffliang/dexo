@@ -3375,6 +3375,22 @@
         }
       }
     },
+    "password_login.hide_password" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hide password"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隐藏密码"
+          }
+        }
+      }
+    },
     "password_login.identifier_placeholder" : {
       "localizations" : {
         "en" : {
@@ -3503,6 +3519,22 @@
         }
       }
     },
+    "password_login.show_password" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show password"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示密码"
+          }
+        }
+      }
+    },
     "password_login.status.captcha" : {
       "localizations" : {
         "en" : {
@@ -3583,18 +3615,18 @@
         }
       }
     },
-    "password_login.subtitle" : {
+    "password_login.subtitle %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enter your linux.do account credentials. Cloudflare and hCaptcha checks may appear."
+            "value" : "Enter your %@ account credentials. Cloudflare and hCaptcha checks may appear."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "输入你的 linux.do 账号密码。可能需要通过 Cloudflare 与 hCaptcha 验证。"
+            "value" : "输入你的 %@ 账号密码。可能需要通过 Cloudflare 与 hCaptcha 验证。"
           }
         }
       }
