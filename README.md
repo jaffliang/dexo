@@ -5,6 +5,7 @@
 <h1 align="center">Dexo</h1>
 
 <p align="center">A native iOS client for Discourse forums, built with UIKit + Swift.</p>
+<p align="center">A fork of <a href="https://github.com/Eilgnaw/dexo">Eilgnaw/dexo</a> focused on linux.do (and idcflare.com) on iOS 15.</p>
 
 <p align="center">
   English | <a href="README.zh-CN.md">中文</a>
@@ -28,6 +29,19 @@
 - [x] **Private Messages** — View messages with unread indicators, mark as read on tap
 - [x] **Secure Auth** — RSA-based Discourse User API Key authentication with Keychain storage
 - [x] **Appearance** — System / Light / Dark mode with custom theme color support
+
+## What's new vs upstream
+
+This fork keeps the upstream Discourse client and adds linux.do / idcflare.com support on iOS 15:
+
+- [x] **iOS 15.0 floor** — Shipping minimum is iOS 15.0. Unsigned Release IPAs go to GitHub Releases; PR CI also uploads a Debug IPA artifact
+- [x] **Password login** — Username/password for linux.do and idcflare.com (hCaptcha, TOTP 2FA). Discourse `invalid_second_factor_method` is treated as a 2FA challenge, not a hard fail
+- [x] **Guest Cloudflare pass** — Guest “过盾” uses the same `WKWebsiteDataStore` as login so `cf_clearance` matches
+- [x] **Authenticated in-app browser** — WKWebView primes `_t` / `_forum_session` / `cf_clearance` from the app jar. Logged-in HTTPS post links and Settings / Me **打开网页** use it. Skips the iOS 15-broken `linux.do/login` SPA so `connect.linux.do` OAuth (e.g. cdk.linux.do, api.coee.ccwu.cc) can complete
+- [x] **Cookie-Editor export** — Settings / Me copies Cookie-Editor JSON for Safari import
+- [x] **Third-party IME** — Password field is visible by default; secure entry is on only while hiding, so iOS 15 third-party keyboards keep working
+- [x] **Crash diagnostics** — Login breadcrumbs plus a copyable last-crash alert on cold start
+- [x] **WebView DoH** — Upstream already has DoH `URLProtocol`; this fork also applies DoH to production WKWebViews via a CONNECT proxy on iOS 17+
 
 ## Tech Stack
 
@@ -91,6 +105,14 @@ dexo/
 │   └── Models/               # API response models
 └── Assets.xcassets/
 ```
+
+## Releases
+
+Unsigned IPAs are published on [GitHub Releases](https://github.com/jaffliang/dexo/releases) after the IPA workflow runs (`v2.0-build.NNN`). Pull requests also upload a Debug IPA artifact.
+
+## Credit
+
+Based on [Eilgnaw/dexo](https://github.com/Eilgnaw/dexo). This fork: [jaffliang/dexo](https://github.com/jaffliang/dexo).
 
 ## Related Projects
 

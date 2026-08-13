@@ -1,7 +1,8 @@
 What to Test
 
-- In standard post mode, scroll down and confirm the three-button bottom bar contracts with momentum into a centered Scroll to Top button. Scroll up and confirm the full bar returns smoothly.
-- Tap the compact Scroll to Top button and confirm the list stops at the true content top and expands the full bar. Taking over with a drag during the return should cancel it immediately.
-- On iOS 26, check the Liquid Glass merging effect as the bottom-bar buttons approach each other. Also verify tree mode, light and dark appearances, and Reduce Motion behavior.
-- Like a post or topic and confirm its image flies toward the left-side target, bursts into fragments on impact, and disappears without lingering views or flashing.
-- Scroll down the home list and tap the Home tab again. Confirm the first tap returns to the top and the second tap refreshes the list.
+Dexo 2.0 (iOS 15+)
+
+- linux.do / idcflare.com: sign in with username and password. Complete hCaptcha if shown. If the account has TOTP 2FA, confirm a 6-digit prompt appears (including when Discourse returns `invalid_second_factor_method`) and that a valid code signs you in.
+- As a guest on linux.do / idcflare, complete the Cloudflare challenge and confirm browsing works after clearance. Sign in afterward and confirm the same clearance is reused.
+- While logged in, tap an HTTPS link in a post and use Me / Settings → Open Web. Confirm the in-app browser is already signed in (e.g. cdk.linux.do, connect.linux.do OAuth). Opening linux.do/login should not hang on the iOS 15 SPA.
+- Settings / Me → copy cookies: confirm Cookie-Editor JSON lands on the pasteboard for Safari import.
