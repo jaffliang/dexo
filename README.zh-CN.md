@@ -5,6 +5,7 @@
 <h1 align="center">Dexo</h1>
 
 <p align="center">一个原生 iOS Discourse 论坛客户端，使用 UIKit + Swift 构建。</p>
+<p align="center">基于 <a href="https://github.com/Eilgnaw/dexo">Eilgnaw/dexo</a> 的 fork，面向 linux.do（以及 idcflare.com），支持 iOS 15。</p>
 
 <p align="center">
   <a href="README.md">English</a> | 中文
@@ -28,6 +29,19 @@
 - [x] **私信** — 查看私信列表，未读标记，点击自动标记已读
 - [x] **安全认证** — 基于 RSA 加密的 Discourse User API Key 认证流程，凭证存储在 Keychain
 - [x] **外观设置** — 跟随系统 / 浅色 / 深色模式，支持自定义主题色
+
+## 本 fork 增强
+
+在上游 Discourse 客户端之上，补齐 linux.do / idcflare.com 在 iOS 15 上的能力：
+
+- [x] **最低 iOS 15.0** — 发版底线为 iOS 15.0。GitHub Actions 产出未签名 Release IPA；PR CI 额外上传 Debug IPA artifact
+- [x] **账密登录** — linux.do 与 idcflare.com 支持用户名/密码（hCaptcha、TOTP 2FA）。Discourse 的 `invalid_second_factor_method` 按二次验证挑战处理，而不是直接失败
+- [x] **游客过盾** — 游客 Cloudflare 挑战与登录共用同一 `WKWebsiteDataStore`，`cf_clearance` 与登录一致
+- [x] **带登录态的应用内浏览器** — WKWebView 会从应用 Cookie 罐写入 `_t` / `_forum_session` / `cf_clearance`。已登录时，帖子里的 HTTPS 链接以及设置 /「我」的**打开网页**走该浏览器。会跳过 iOS 15 上会卡死的 `linux.do/login` SPA，以便完成 `connect.linux.do` OAuth（如 cdk.linux.do、api.coee.ccwu.cc）
+- [x] **Cookie-Editor 导出** — 设置 /「我」可复制 Cookie-Editor JSON，供 Safari 导入
+- [x] **第三方输入法** — 密码框默认明文；仅在用户选择隐藏时启用安全输入，避免 iOS 15 屏蔽搜狗等第三方键盘
+- [x] **崩溃诊断** — 登录面包屑，以及冷启动时可复制的上次崩溃信息
+- [x] **WebView DoH** — 上游已有 DoH `URLProtocol`；本 fork 在 iOS 17+ 还会通过 CONNECT 代理把 DoH 应用到正式 WKWebView
 
 ## 技术栈
 
@@ -91,6 +105,14 @@ dexo/
 │   └── Models/               # API 响应模型
 └── Assets.xcassets/
 ```
+
+## 发布
+
+IPA 工作流跑完后，未签名 IPA 会发布到 [GitHub Releases](https://github.com/jaffliang/dexo/releases)，标签形如 `v2.0-build.NNN`。Pull Request 的 CI 也会上传 Debug IPA artifact。
+
+## 致谢
+
+基于 [Eilgnaw/dexo](https://github.com/Eilgnaw/dexo)。本 fork：[jaffliang/dexo](https://github.com/jaffliang/dexo)。
 
 ## 关联项目
 

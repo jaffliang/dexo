@@ -5126,6 +5126,54 @@
         }
       }
     },
+    "settings.about.footer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Based on Eilgnaw/dexo. Tap to open this fork on GitHub."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "基于 Eilgnaw/dexo。点按打开本 fork 的 GitHub 仓库。"
+          }
+        }
+      }
+    },
+    "settings.about.subtitle" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "linux.do / idcflare fork of Eilgnaw/dexo for iOS 15."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "面向 linux.do / idcflare 的 Eilgnaw/dexo fork，支持 iOS 15。"
+          }
+        }
+      }
+    },
+    "settings.about.title %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dexo %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dexo %@"
+          }
+        }
+      }
+    },
     "settings.app_icon" : {
       "localizations" : {
         "en" : {

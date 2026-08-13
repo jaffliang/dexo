@@ -147,6 +147,8 @@ extension SettingsViewController: UITableViewDataSource {
 
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch visibleSections[section] {
+        case .about:
+            return String(localized: "settings.about.footer")
         case .network:
             return String(localized: "settings.doh.root.footer")
         #if DEBUG
@@ -188,7 +190,7 @@ extension SettingsViewController: UITableViewDataSource {
         case .storage:
             return makeStorageCell(tableView, indexPath: indexPath)
         case .about:
-            return makeSourceCodeCell(tableView, indexPath: indexPath)
+            return makeAboutCell(tableView, indexPath: indexPath)
         case .network:
             let row = networkRows()[indexPath.row]
             switch row {
@@ -351,11 +353,20 @@ extension SettingsViewController: UITableViewDataSource {
         return cell
     }
 
-    private func makeSourceCodeCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
-        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+    private static let aboutURL = URL(string: "https://github.com/jaffliang/dexo")
+
+    private var marketingVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0"
+    }
+
+    private func makeAboutCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
         applyFonts(to: cell)
-        cell.textLabel?.text = String(localized: "settings.source_code")
-        cell.detailTextLabel?.text = "GitHub"
+        cell.textLabel?.text = String(localized: "settings.about.title \(marketingVersion)")
+        cell.detailTextLabel?.font = FontManager.shared.font(size: 13)
+        cell.detailTextLabel?.textColor = .secondaryLabel
+        cell.detailTextLabel?.numberOfLines = 0
+        cell.detailTextLabel?.text = String(localized: "settings.about.subtitle")
         cell.accessoryType = .disclosureIndicator
         return cell
     }
@@ -434,7 +445,7 @@ extension SettingsViewController: UITableViewDelegate {
             let vc = CacheViewController()
             navigationController?.pushViewController(vc, animated: true)
         case .about:
-            if let url = URL(string: "https://github.com/Eilgnaw/dexo") {
+            if let url = Self.aboutURL {
                 ExternalLinkOpener.open(url, from: self)
             }
         case .network:
