@@ -38,7 +38,7 @@ final class PasswordLoginCaptchaViewController: BaseViewController {
         super.viewDidLoad()
         title = String(localized: "password_login.captcha.title")
         navigationItem.leftBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .close,
+            barButtonSystemItem: .cancel,
             target: self,
             action: #selector(closeTapped)
         )
@@ -70,10 +70,7 @@ final class PasswordLoginCaptchaViewController: BaseViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         didAppear = true
-        if let appearContinuation {
-            self.appearContinuation = nil
-            appearContinuation.resume()
-        }
+        takeAppearContinuation()?.resume()
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -89,6 +86,12 @@ final class PasswordLoginCaptchaViewController: BaseViewController {
                 appearContinuation = cont
             }
         }
+    }
+
+    private func takeAppearContinuation() -> CheckedContinuation<Void, Never>? {
+        let pending = appearContinuation
+        appearContinuation = nil
+        return pending
     }
 
     func setStatus(_ text: String?, busy: Bool) {
