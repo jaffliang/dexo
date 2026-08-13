@@ -9,9 +9,10 @@ extension WebCookieStore {
         return cookies(for: url).contains { $0.name == "cf_clearance" }
     }
 
-    /// Writes jar cookies into a WKWebView data store with full attributes,
-    /// including Domain=.<parent> copies of host-only linux.do-family SSO
-    /// cookies when `url` is a subdomain.
+    /// Writes jar cookies into a WKWebView data store with full attributes.
+    /// Awaits every `setCookie` completion before returning so iOS 15 does not
+    /// race `loadRequest`. Skips cookies already present with the same
+    /// name/domain/path (do not invent a second `cf_clearance`).
     @MainActor
     func primeToWebView(
         _ dataStore: WKWebsiteDataStore,
@@ -21,7 +22,13 @@ extension WebCookieStore {
         let source = cookiesForAuthenticatedBrowsing(for: url)
             .filter { !excludingNames.contains($0.name) }
         let store = dataStore.httpCookieStore
+        let existing = await withCheckedContinuation { cont in
+            store.getAllCookies { cont.resume(returning: $0) }
+        }
+        var seen = Set(existing.map { Self.cookieIdentity($0) })
         for cookie in source {
+            let identity = Self.cookieIdentity(cookie)
+            guard seen.insert(identity).inserted else { continue }
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 store.setCookie(cookie) { cont.resume() }
             }

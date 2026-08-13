@@ -59,6 +59,59 @@ final class AuthenticatedWebViewController: BaseViewController {
         presenter.present(navigation, animated: true)
     }
 
+    static func promptAndPresent(from presenter: UIViewController, defaultURL: URL?) {
+        let fallback = WebCookieStore.shared.cookieEditorExportURLFromJar()
+            .flatMap { ForumPolicy.defaultInAppBrowserURL(for: $0.absoluteString) }
+            ?? URL(string: "https://cdk.linux.do/")
+        let alert = UIAlertController(
+            title: String(localized: "me.open_web"),
+            message: String(localized: "me.open_web.prompt"),
+            preferredStyle: .alert
+        )
+        alert.addTextField { textField in
+            textField.keyboardType = .URL
+            textField.autocapitalizationType = .none
+            textField.autocorrectionType = .no
+            textField.text = defaultURL?.absoluteString ?? fallback?.absoluteString
+        }
+        alert.addAction(UIAlertAction(title: String(localized: "action.cancel"), style: .cancel))
+        alert.addAction(UIAlertAction(title: String(localized: "action.open"), style: .default) { _ in
+            let raw = alert.textFields?.first?.text ?? ""
+            DispatchQueue.main.async {
+                guard let url = normalizedWebURL(from: raw) else {
+                    let invalid = UIAlertController(
+                        title: String(localized: "add_forum.error.invalid_url"),
+                        message: nil,
+                        preferredStyle: .alert
+                    )
+                    invalid.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
+                    presenter.present(invalid, animated: true)
+                    return
+                }
+                ExternalLinkOpener.open(url, from: presenter)
+            }
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    static func normalizedWebURL(from input: String) -> URL? {
+        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let lowercaseValue = value.lowercased()
+        if !lowercaseValue.hasPrefix("http://") && !lowercaseValue.hasPrefix("https://") {
+            guard !value.contains("://") else { return nil }
+            value = "https://" + value
+        }
+        guard let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              !host.isEmpty,
+              let url = components.url
+        else { return nil }
+        return url
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = String(localized: "browser.title")
@@ -138,7 +191,7 @@ final class AuthenticatedWebViewController: BaseViewController {
             webView.uiDelegate = coordinator
             webView.isOpaque = false
             webView.backgroundColor = ThemeManager.shared.cardBackgroundColor
-            if let userAgent = WebCookieStore.shared.userAgent, !userAgent.isEmpty {
+            if let userAgent = WebCookieStore.safariCompatibleUserAgent(WebCookieStore.shared.userAgent) {
                 webView.customUserAgent = userAgent
             }
             webView.translatesAutoresizingMaskIntoConstraints = false

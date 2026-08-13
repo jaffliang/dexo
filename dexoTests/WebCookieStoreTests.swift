@@ -180,7 +180,7 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertTrue(first === second)
     }
 
-    func testHostOnlyLinuxDoSessionCookieDoesNotMatchCDKUntilDomainCopy() {
+    func testHostOnlyLinuxDoSessionCookieIsNotRewrittenToDomainCookie() throws {
         let origin = URL(string: "https://linux.do/")!
         let cdk = URL(string: "https://cdk.linux.do/")!
         let token = HTTPCookie(properties: [
@@ -191,7 +191,15 @@ final class WebCookieStoreTests: XCTestCase {
             .secure: "TRUE",
             .expires: Date(timeIntervalSince1970: 1_900_000_000),
         ])!
-        WebCookieStore.shared.setCookies([token])
+        let clearance = HTTPCookie(properties: [
+            .domain: ".linux.do",
+            .path: "/",
+            .name: "cf_clearance",
+            .value: "cf-token",
+            .secure: "TRUE",
+            .expires: Date(timeIntervalSince1970: 1_900_000_000),
+        ])!
+        WebCookieStore.shared.setCookies([token, clearance])
         defer { WebCookieStore.shared.clearCookies(for: "https://linux.do") }
 
         XCTAssertTrue(WebCookieStore.shared.cookies(for: origin).contains { $0.name == "_t" })
@@ -200,29 +208,23 @@ final class WebCookieStoreTests: XCTestCase {
             "Host-only linux.do _t must not be sent to cdk.linux.do"
         )
 
-        let copies = WebCookieStore.shared.subdomainSSOCookies(for: cdk)
-        XCTAssertTrue(copies.contains { $0.name == "_t" })
-        XCTAssertTrue(
-            WebCookieStore.shared.cookiesForAuthenticatedBrowsing(for: cdk).contains { $0.name == "_t" }
-        )
-        XCTAssertTrue(
-            WebCookieStore.shared.hasAuthTokenCookie(for: origin),
-            "Host-only linux.do _t should count as a site login cookie"
-        )
-        XCTAssertTrue(
-            WebCookieStore.shared.hasAuthTokenCookie(for: cdk),
-            "cdk.linux.do should see the linux.do _t on the registrable host before Domain copies are stored"
-        )
+        let primed = WebCookieStore.shared.cookiesForAuthenticatedBrowsing(for: cdk)
+        let tCookies = primed.filter { $0.name == "_t" }
+        XCTAssertEqual(tCookies.count, 1)
+        XCTAssertEqual(tCookies.first?.domain, "linux.do")
+        XCTAssertFalse(tCookies.first?.domain.hasPrefix(".") == true)
+        XCTAssertEqual(primed.filter { $0.name == "cf_clearance" }.count, 1)
 
-        WebCookieStore.shared.setCookies(copies)
-        XCTAssertTrue(
-            WebCookieStore.shared.cookies(for: cdk).contains { $0.name == "_t" },
-            "Domain=.linux.do copy should match cdk.linux.do; copy domain=\(copies.first?.domain ?? "nil")"
-        )
-        XCTAssertTrue(
-            WebCookieStore.shared.subdomainSSOCookies(for: origin).isEmpty,
-            "Do not inject Domain copies when opening the registrable host"
-        )
+        XCTAssertTrue(WebCookieStore.shared.hasAuthTokenCookie(for: origin))
+        XCTAssertTrue(WebCookieStore.shared.hasAuthTokenCookie(for: cdk))
+
+        let exportJSON = try WebCookieStore.shared.cookieEditorJSON(for: cdk)
+        let exportData = try XCTUnwrap(exportJSON.data(using: .utf8))
+        let exported = try XCTUnwrap(JSONSerialization.jsonObject(with: exportData) as? [[String: Any]])
+        let exportedT = exported.filter { ($0["name"] as? String) == "_t" }
+        XCTAssertEqual(exportedT.count, 1)
+        XCTAssertEqual(exportedT.first?["domain"] as? String, "linux.do")
+        XCTAssertEqual((exportedT.first?["hostOnly"] as? NSNumber)?.boolValue, true)
     }
 
     func testHasAuthTokenCookieRequiresTNotOnlyForumSession() {
@@ -269,14 +271,21 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertEqual((hostOnly["expirationDate"] as? NSNumber)?.intValue, 1_800_000_000)
         XCTAssertEqual((hostOnly["hostOnly"] as? NSNumber)?.boolValue, true)
 
-        let domainCopy = parsed.first {
-            ($0["domain"] as? String) == ".linux.do" && ($0["name"] as? String) == "_t"
-        }
-        XCTAssertNotNil(domainCopy, "Cookie-Editor JSON should include a Domain=.linux.do copy")
-        XCTAssertEqual((domainCopy?["hostOnly"] as? NSNumber)?.boolValue, false)
-        XCTAssertEqual((domainCopy?["expirationDate"] as? NSNumber)?.intValue, 1_800_000_000)
-        XCTAssertEqual(domainCopy?["value"] as? String, "export-token")
-        XCTAssertEqual(domainCopy?["path"] as? String, "/")
+        XCTAssertNil(
+            parsed.first { ($0["domain"] as? String) == ".linux.do" && ($0["name"] as? String) == "_t" },
+            "Must not invent Domain=.linux.do copies of host-only _t"
+        )
+    }
+
+    func testSafariCompatibleUserAgentAppendsMissingVersionAndSafariTokens() {
+        let stock = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+        let resolved = WebCookieStore.safariCompatibleUserAgent(stock)
+        XCTAssertEqual(resolved, stock + " Version/15.6.1 Safari/604.1")
+
+        let full = stock + " Version/15.6.1 Safari/604.1"
+        XCTAssertEqual(WebCookieStore.safariCompatibleUserAgent(full), full)
+        XCTAssertNil(WebCookieStore.safariCompatibleUserAgent(nil))
+        XCTAssertNil(WebCookieStore.safariCompatibleUserAgent("  "))
     }
 
     private func cookieHeaderCount(in request: URLRequest) -> Int {

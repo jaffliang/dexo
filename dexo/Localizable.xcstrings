@@ -6436,6 +6436,22 @@
         }
       }
     },
+    "settings.section.session" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forum Login"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "论坛登录"
+          }
+        }
+      }
+    },
     "settings.section.storage" : {
       "localizations" : {
         "en" : {

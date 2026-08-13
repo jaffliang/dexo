@@ -247,57 +247,12 @@ final class MeViewController: ObservableViewController {
     private func presentOpenWebPrompt() {
         let defaultURL = ForumPolicy.defaultInAppBrowserURL(for: api.baseURL)
             ?? URL(string: api.baseURL)
-        let alert = UIAlertController(
-            title: String(localized: "me.open_web"),
-            message: String(localized: "me.open_web.prompt"),
-            preferredStyle: .alert
-        )
-        alert.addTextField { textField in
-            textField.keyboardType = .URL
-            textField.autocapitalizationType = .none
-            textField.autocorrectionType = .no
-            textField.text = defaultURL?.absoluteString ?? "https://cdk.linux.do/"
-        }
-        alert.addAction(UIAlertAction(title: String(localized: "action.cancel"), style: .cancel))
-        alert.addAction(UIAlertAction(title: String(localized: "action.open"), style: .default) { [weak self] _ in
-            guard let self else { return }
-            let raw = alert.textFields?.first?.text ?? ""
-            guard let url = Self.normalizedWebURL(from: raw) else {
-                let invalid = UIAlertController(
-                    title: String(localized: "add_forum.error.invalid_url"),
-                    message: nil,
-                    preferredStyle: .alert
-                )
-                invalid.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
-                self.present(invalid, animated: true)
-                return
-            }
-            AuthenticatedWebViewController.present(url, from: self)
-        })
-        present(alert, animated: true)
+        AuthenticatedWebViewController.promptAndPresent(from: self, defaultURL: defaultURL)
     }
 
     private func presentCopyCookies() {
         guard let url = URL(string: api.baseURL) else { return }
         CookieExportPresenter.confirmAndCopy(from: self, url: url)
-    }
-
-    private static func normalizedWebURL(from input: String) -> URL? {
-        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return nil }
-        let lowercaseValue = value.lowercased()
-        if !lowercaseValue.hasPrefix("http://") && !lowercaseValue.hasPrefix("https://") {
-            guard !value.contains("://") else { return nil }
-            value = "https://" + value
-        }
-        guard let components = URLComponents(string: value),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = components.host,
-              !host.isEmpty,
-              let url = components.url
-        else { return nil }
-        return url
     }
 
     private func loginTapped() {
