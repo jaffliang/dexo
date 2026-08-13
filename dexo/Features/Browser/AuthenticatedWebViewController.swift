@@ -158,8 +158,8 @@ final class AuthenticatedWebViewController: BaseViewController {
                 self?.progressView.isHidden = progress >= 1
             }
 
-            await WebCookieStore.shared.prime(
-                into: webView.configuration.websiteDataStore,
+            await WebCookieStore.shared.primeToWebView(
+                webView.configuration.websiteDataStore,
                 for: initialURL
             )
             guard !Task.isCancelled else { return }

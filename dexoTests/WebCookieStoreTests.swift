@@ -205,6 +205,14 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertTrue(
             WebCookieStore.shared.cookiesForAuthenticatedBrowsing(for: cdk).contains { $0.name == "_t" }
         )
+        XCTAssertTrue(
+            WebCookieStore.shared.hasAuthTokenCookie(for: origin),
+            "Host-only linux.do _t should count as a site login cookie"
+        )
+        XCTAssertTrue(
+            WebCookieStore.shared.hasAuthTokenCookie(for: cdk),
+            "cdk.linux.do should see the linux.do _t on the registrable host before Domain copies are stored"
+        )
 
         WebCookieStore.shared.setCookies(copies)
         XCTAssertTrue(
@@ -214,6 +222,24 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertTrue(
             WebCookieStore.shared.subdomainSSOCookies(for: origin).isEmpty,
             "Do not inject Domain copies when opening the registrable host"
+        )
+    }
+
+    func testHasAuthTokenCookieRequiresTNotOnlyForumSession() {
+        let origin = URL(string: "https://linux.do/")!
+        let session = HTTPCookie(properties: [
+            .domain: "linux.do",
+            .path: "/",
+            .name: "_forum_session",
+            .value: "session-only",
+            .secure: "TRUE",
+        ])!
+        WebCookieStore.shared.setCookies([session])
+        defer { WebCookieStore.shared.clearCookies(for: "https://linux.do") }
+
+        XCTAssertFalse(WebCookieStore.shared.hasAuthTokenCookie(for: origin))
+        XCTAssertFalse(
+            WebCookieStore.shared.hasAuthTokenCookie(for: URL(string: "https://cdk.linux.do/")!)
         )
     }
 

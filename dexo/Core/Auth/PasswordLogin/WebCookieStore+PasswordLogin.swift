@@ -9,14 +9,23 @@ extension WebCookieStore {
         return cookies(for: url).contains { $0.name == "cf_clearance" }
     }
 
-    /// Writes jar cookies into a WKWebView data store with full attributes.
+    /// Writes jar cookies into a WKWebView data store with full attributes,
+    /// including Domain=.<parent> copies of host-only linux.do-family SSO
+    /// cookies when `url` is a subdomain.
     @MainActor
     func primeToWebView(
         _ dataStore: WKWebsiteDataStore,
         for url: URL,
         excludingNames: Set<String> = []
     ) async {
-        await prime(into: dataStore, for: url, excludingNames: excludingNames)
+        let source = cookiesForAuthenticatedBrowsing(for: url)
+            .filter { !excludingNames.contains($0.name) }
+        let store = dataStore.httpCookieStore
+        for cookie in source {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                store.setCookie(cookie) { cont.resume() }
+            }
+        }
     }
 
     @MainActor

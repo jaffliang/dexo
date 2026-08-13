@@ -7,7 +7,14 @@ extension WebCookieStore {
 
     func hasDiscourseSessionCookies(for baseURL: String) -> Bool {
         guard let url = URL(string: baseURL) else { return false }
-        return cookies(for: url).contains { Self.discourseSessionCookieNames.contains($0.name) }
+        return hasAuthTokenCookie(for: url)
+    }
+
+    /// API-key login via `ASWebAuthenticationSession` never stores `_t`.
+    /// Password / web login do. Look up the registrable origin so a host-only
+    /// `linux.do` `_t` still counts when opening `cdk.linux.do`.
+    func hasAuthTokenCookie(for url: URL) -> Bool {
+        cookies(for: Self.cookieEditorExportURL(for: url)).contains { $0.name == "_t" }
     }
 
     /// Jar cookies that apply to `url`, plus Domain=.<registrable> copies of
@@ -100,24 +107,6 @@ extension WebCookieStore {
               let origin = URL(string: "https://\(registrable)/")
         else { return url }
         return origin
-    }
-
-    /// Primes the shared WebKit jar so the next load of `url` sends session cookies.
-    /// iOS 15 only has the completion-handler `setCookie` API.
-    @MainActor
-    func prime(
-        into dataStore: WKWebsiteDataStore,
-        for url: URL,
-        excludingNames: Set<String> = []
-    ) async {
-        let source = cookiesForAuthenticatedBrowsing(for: url)
-            .filter { !excludingNames.contains($0.name) }
-        let store = dataStore.httpCookieStore
-        for cookie in source {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                store.setCookie(cookie) { cont.resume() }
-            }
-        }
     }
 
     // MARK: - Internals

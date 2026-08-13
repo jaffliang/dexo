@@ -577,6 +577,38 @@
         }
       }
     },
+    "browser.missing_session.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This page needs the site login cookie from a password or in-app web login. Signing in with an API key does not share that cookie with the browser."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开该网页需要密码登录或网页登录留下的站点 Cookie。使用 API Key 登录无法把登录态带进浏览器。"
+          }
+        }
+      }
+    },
+    "browser.missing_session.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No site login cookie"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有站点登录 Cookie"
+          }
+        }
+      }
+    },
     "browser.open_in_safari" : {
       "localizations" : {
         "en" : {
