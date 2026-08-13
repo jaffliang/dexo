@@ -156,6 +156,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
     private static func saveUnlocked(_ state: State) {
         if let data = try? JSONEncoder().encode(state) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
+            UserDefaults.standard.synchronize()
         }
     }
 
