@@ -75,7 +75,7 @@ final class EncryptedDNSManager {
         guard !didInstallImageDownloader else { return }
         didInstallImageDownloader = true
         let downloader = SDWebImageDownloader.shared
-        let sessionConfiguration = downloader.config.sessionConfiguration
+        let sessionConfiguration = downloader.config.sessionConfiguration ?? URLSessionConfiguration.default
         DoHGatewayRuntime.prepare(sessionConfiguration)
         downloader.config.sessionConfiguration = sessionConfiguration
     }
