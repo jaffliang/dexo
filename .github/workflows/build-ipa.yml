@@ -57,9 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v${{ steps.version.outputs.version }}-build.${{ steps.buildnumber.outputs.build }}"
+          BUILD="${{ steps.buildnumber.outputs.build }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}-build.$(printf '%03d' "$BUILD")"
           git tag "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" build/dexo-unsigned.ipa \
-            --title "Dexo $TAG" \
-            --generate-notes
+            --title "Dexo ${VERSION} (${BUILD})" \
+            --generate-notes \
+            --latest

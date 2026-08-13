@@ -36,7 +36,6 @@ final class PasswordLoginViewController: BaseViewController {
 
     private let subtitleLabel: UILabel = {
         let label = UILabel()
-        label.text = String(localized: "password_login.subtitle")
         label.font = FontManager.shared.font(size: 15)
         label.textColor = UIColor.secondaryLabel
         label.numberOfLines = 0
@@ -51,6 +50,15 @@ final class PasswordLoginViewController: BaseViewController {
         placeholder: String(localized: "password_login.password_placeholder"),
         secure: true
     )
+
+    private let passwordToggleButton: UIButton = {
+        let button = UIButton(type: .system)
+        let symbol = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        button.setPreferredSymbolConfiguration(symbol, forImageIn: .normal)
+        button.frame = CGRect(x: 0, y: 2, width: 40, height: 44)
+        button.accessibilityTraits = .button
+        return button
+    }()
 
     private let rememberRow: UIView = {
         let view = UIView()
@@ -124,6 +132,7 @@ final class PasswordLoginViewController: BaseViewController {
         self.forum = forum
         self.config = config
         super.init(nibName: nil, bundle: nil)
+        subtitleLabel.text = String(localized: "password_login.subtitle \(config.subtitleHost(for: forum.baseURL))")
     }
 
     @available(*, unavailable)
@@ -176,10 +185,12 @@ final class PasswordLoginViewController: BaseViewController {
         ])
 
         primaryButton.addTarget(self, action: #selector(primaryTapped), for: .touchUpInside)
+        passwordToggleButton.addTarget(self, action: #selector(togglePasswordVisibility), for: .touchUpInside)
         passwordField.returnKeyType = .go
         passwordField.delegate = self
         identifierField.delegate = self
         spinner.hidesWhenStopped = true
+        updatePasswordToggleAppearance()
 
         debugBreadcrumbLabel.addGestureRecognizer(
             UITapGestureRecognizer(target: self, action: #selector(debugBreadcrumbTapped))
@@ -226,6 +237,7 @@ final class PasswordLoginViewController: BaseViewController {
         rememberRow.layer.borderWidth = 1
         rememberRow.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
         rememberSwitch.onTintColor = theme.accentColor
+        passwordToggleButton.tintColor = UIColor.secondaryLabel
         var config = primaryButton.configuration ?? .filled()
         config.baseBackgroundColor = theme.accentColor
         primaryButton.configuration = config
@@ -239,14 +251,47 @@ final class PasswordLoginViewController: BaseViewController {
         tf.isSecureTextEntry = secure
         tf.autocapitalizationType = .none
         tf.autocorrectionType = .no
-        tf.textContentType = secure ? .password : .username
+        // `.username` / `.password` (and asciiCapable) pull the system
+        // autofill keyboard and block third-party IMEs such as Sogou.
+        tf.keyboardType = .default
+        tf.textContentType = nil
         tf.borderStyle = .none
         tf.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
         tf.leftViewMode = .always
-        tf.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
+        if secure {
+            let container = UIView(frame: CGRect(x: 0, y: 0, width: 44, height: 48))
+            container.addSubview(passwordToggleButton)
+            tf.rightView = container
+        } else {
+            tf.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
+        }
         tf.rightViewMode = .always
         styleField(tf)
         return tf
+    }
+
+    @objc private func togglePasswordVisibility() {
+        let wasFirstResponder = passwordField.isFirstResponder
+        if wasFirstResponder {
+            passwordField.resignFirstResponder()
+        }
+        passwordField.isSecureTextEntry.toggle()
+        passwordField.keyboardType = .default
+        passwordField.textContentType = nil
+        styleField(passwordField)
+        updatePasswordToggleAppearance()
+        if wasFirstResponder {
+            passwordField.becomeFirstResponder()
+        }
+    }
+
+    private func updatePasswordToggleAppearance() {
+        let hidden = passwordField.isSecureTextEntry
+        let name = hidden ? "eye" : "eye.slash"
+        passwordToggleButton.setImage(UIImage(systemName: name), for: .normal)
+        passwordToggleButton.accessibilityLabel = String(
+            localized: hidden ? "password_login.show_password" : "password_login.hide_password"
+        )
     }
 
     private func styleField(_ tf: UITextField) {
@@ -304,6 +349,7 @@ final class PasswordLoginViewController: BaseViewController {
         primaryButton.isEnabled = !busy && step == .form
         identifierField.isEnabled = !busy && step == .form
         passwordField.isEnabled = !busy && step == .form
+        passwordToggleButton.isEnabled = !busy && step == .form
         rememberSwitch.isEnabled = !busy && step == .form
         statusLabel.text = status
         if busy { spinner.startAnimating() } else { spinner.stopAnimating() }
