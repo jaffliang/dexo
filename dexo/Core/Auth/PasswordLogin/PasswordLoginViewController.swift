@@ -507,6 +507,10 @@ final class PasswordLoginViewController: BaseViewController {
 
     private func offerUnfinishedBreadcrumbIfNeeded() {
         if LastFatalExceptionStore.peekReport() != nil {
+            if let trail = PasswordLoginCrashBreadcrumb.consumeUnfinishedTrail() {
+                lastUnfinishedBreadcrumb = trail
+            }
+            didOfferBreadcrumb = true
             debugBreadcrumbLabel.text = String(localized: "password_login.debug.exception_hint")
             debugBreadcrumbLabel.isHidden = false
             DispatchQueue.main.async { [weak self] in

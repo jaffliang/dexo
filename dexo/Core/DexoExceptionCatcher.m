@@ -1,40 +1,79 @@
 #import "DexoExceptionCatcher.h"
 
 static NSString * const DexoLastFatalExceptionKey = @"dexo.lastFatalException";
+static NSString * const DexoLastFatalExceptionSummaryKey = @"dexo.lastFatalException.summary";
 static NSString * const DexoExceptionErrorDomain = @"xyz.47258.dexo.objc-exception";
+static const NSUInteger DexoLastFatalExceptionStackMaxBytes = 12 * 1024;
 
 static NSUncaughtExceptionHandler *DexoPreviousUncaughtExceptionHandler = NULL;
 static BOOL DexoExceptionHandlerInstalled = NO;
+
+static NSString *DexoCappedStack(NSArray<NSString *> *symbols) {
+    NSString *joined = [symbols componentsJoinedByString:@"\n"] ?: @"";
+    NSData *utf8 = [joined dataUsingEncoding:NSUTF8StringEncoding];
+    if (utf8.length <= DexoLastFatalExceptionStackMaxBytes) {
+        return joined;
+    }
+    NSData *prefix = [utf8 subdataWithRange:NSMakeRange(0, DexoLastFatalExceptionStackMaxBytes)];
+    NSString *trimmed = [[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding];
+    if (trimmed.length == 0) {
+        NSUInteger chars = MIN(joined.length, DexoLastFatalExceptionStackMaxBytes);
+        trimmed = [joined substringToIndex:chars];
+    }
+    return [trimmed stringByAppendingString:@"\n…(truncated)"];
+}
+
+static NSString *DexoExceptionReason(NSException *exception) {
+    if (exception.reason.length > 0) {
+        return exception.reason;
+    }
+    id userInfo = exception.userInfo;
+    if (userInfo != nil) {
+        NSString *info = [userInfo description];
+        if (info.length > 0) {
+            if (info.length > 2048) {
+                return [[info substringToIndex:2048] stringByAppendingString:@"…"];
+            }
+            return info;
+        }
+    }
+    return @"";
+}
 
 static NSError *DexoErrorFromException(NSException *exception) {
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
     if (exception.name) {
         info[@"exception.name"] = exception.name;
     }
-    NSString *reason = exception.reason ?: @"NSException";
-    info[NSLocalizedDescriptionKey] = reason;
+    NSString *reason = DexoExceptionReason(exception);
+    info[NSLocalizedDescriptionKey] = reason.length > 0 ? reason : @"NSException";
     NSArray<NSString *> *symbols = exception.callStackSymbols;
     if (symbols.count > 0) {
-        info[@"exception.stack"] = [symbols componentsJoinedByString:@"\n"];
+        info[@"exception.stack"] = DexoCappedStack(symbols);
     }
     return [NSError errorWithDomain:DexoExceptionErrorDomain code:1 userInfo:info];
 }
 
 static void DexoUncaughtExceptionHandler(NSException *exception) {
     @try {
+        NSString *name = exception.name ?: @"";
+        NSString *reason = DexoExceptionReason(exception);
+        NSString *summary = [NSString stringWithFormat:@"%@: %@", name, reason.length > 0 ? reason : @"(empty reason)"];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        // Tiny write first so name/reason survive if we abort while serializing the stack.
+        [defaults setObject:summary forKey:DexoLastFatalExceptionSummaryKey];
+        [defaults synchronize];
+
         NSMutableDictionary *payload = [NSMutableDictionary dictionary];
-        payload[@"name"] = exception.name ?: @"";
-        payload[@"reason"] = exception.reason ?: @"";
-        payload[@"stack"] = [exception.callStackSymbols componentsJoinedByString:@"\n"] ?: @"";
+        payload[@"name"] = name;
+        payload[@"reason"] = reason;
+        payload[@"stack"] = DexoCappedStack(exception.callStackSymbols);
         payload[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
         payload[@"build"] = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
         payload[@"version"] = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
-        NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-        if (data != nil) {
-            [[NSUserDefaults standardUserDefaults] setObject:data forKey:DexoLastFatalExceptionKey];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-        }
-        NSLog(@"[DexoException] %@ %@", exception.name, exception.reason);
+        [defaults setObject:payload forKey:DexoLastFatalExceptionKey];
+        [defaults synchronize];
+        NSLog(@"[DexoException] %@", summary);
     } @catch (NSException *ignored) {
         // Never throw from the uncaught handler.
     }

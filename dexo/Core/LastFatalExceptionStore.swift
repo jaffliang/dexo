@@ -4,6 +4,7 @@ import UIKit
 /// Reads `dexo.lastFatalException` written by `DexoExceptionCatcher` before abort.
 nonisolated enum LastFatalExceptionStore: Sendable {
     static let defaultsKey = "dexo.lastFatalException"
+    private static let summaryKey = "dexo.lastFatalException.summary"
 
     static func peekReport() -> String? {
         guard let payload = loadPayload() else { return nil }
@@ -11,7 +12,9 @@ nonisolated enum LastFatalExceptionStore: Sendable {
     }
 
     static func clear() {
-        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: defaultsKey)
+        defaults.removeObject(forKey: summaryKey)
     }
 
     private struct Payload {
@@ -34,6 +37,8 @@ nonisolated enum LastFatalExceptionStore: Sendable {
             json = dict
         } else if let text = object as? String, !text.isEmpty {
             return Payload(name: "unknown", reason: text, stack: "", timestamp: Date().timeIntervalSince1970, version: "", build: "")
+        } else if let summary = defaults.string(forKey: summaryKey), !summary.isEmpty {
+            return Payload(name: "unknown", reason: summary, stack: "", timestamp: Date().timeIntervalSince1970, version: "", build: "")
         } else {
             return nil
         }
@@ -64,8 +69,8 @@ nonisolated enum LastFatalExceptionStore: Sendable {
         var lines = [
             "dexo \(payload.version) (\(payload.build))",
             when,
-            "name: \(payload.name)",
-            "reason: \(PasswordLoginCrashBreadcrumb.sanitizeForReport(payload.reason))",
+            "name: \(payload.name.isEmpty ? "(empty)" : payload.name)",
+            "reason: \(payload.reason.isEmpty ? "(empty — NSException.reason was nil)" : PasswordLoginCrashBreadcrumb.sanitizeForReport(payload.reason))",
         ]
         if let trail = PasswordLoginCrashBreadcrumb.currentTrailForDiagnostics() {
             lines.append("")
