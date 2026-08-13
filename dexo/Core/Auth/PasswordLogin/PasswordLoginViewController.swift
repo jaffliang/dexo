@@ -44,12 +44,17 @@ final class PasswordLoginViewController: BaseViewController {
 
     private lazy var identifierField: UITextField = makeField(
         placeholder: String(localized: "password_login.identifier_placeholder"),
-        secure: false
+        showsVisibilityToggle: false
     )
     private lazy var passwordField: UITextField = makeField(
         placeholder: String(localized: "password_login.password_placeholder"),
-        secure: true
+        showsVisibilityToggle: true
     )
+
+    /// User chose to hide the password. Secure entry is applied only while the
+    /// password field is first responder — a secure field anywhere in the
+    /// window disables third-party IMEs on iOS 15, including the username field.
+    private var passwordHiddenByUser = false
 
     private let passwordToggleButton: UIButton = {
         let button = UIButton(type: .system)
@@ -245,20 +250,17 @@ final class PasswordLoginViewController: BaseViewController {
         styleField(passwordField)
     }
 
-    private func makeField(placeholder: String, secure: Bool) -> UITextField {
+    private func makeField(placeholder: String, showsVisibilityToggle: Bool) -> UITextField {
         let tf = UITextField()
         tf.placeholder = placeholder
-        tf.isSecureTextEntry = secure
-        tf.autocapitalizationType = .none
-        tf.autocorrectionType = .no
-        // `.username` / `.password` (and asciiCapable) pull the system
-        // autofill keyboard and block third-party IMEs such as Sogou.
-        tf.keyboardType = .default
-        tf.textContentType = nil
+        // Visible by default. iOS 15 disables third-party keyboards for the
+        // whole form if any field in the window is secure.
+        tf.isSecureTextEntry = false
         tf.borderStyle = .none
         tf.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
         tf.leftViewMode = .always
-        if secure {
+        configureLoginFieldKeyboard(tf)
+        if showsVisibilityToggle {
             let container = UIView(frame: CGRect(x: 0, y: 0, width: 44, height: 48))
             container.addSubview(passwordToggleButton)
             tf.rightView = container
@@ -270,14 +272,25 @@ final class PasswordLoginViewController: BaseViewController {
         return tf
     }
 
+    private func configureLoginFieldKeyboard(_ tf: UITextField) {
+        tf.autocapitalizationType = .none
+        tf.autocorrectionType = .no
+        tf.spellCheckingType = .no
+        // `.username` / `.password` / `.oneTimeCode` (and asciiCapable) pull
+        // the system autofill keyboard and block third-party IMEs such as Sogou.
+        tf.keyboardType = .default
+        tf.textContentType = nil
+        tf.passwordRules = nil
+    }
+
     @objc private func togglePasswordVisibility() {
+        passwordHiddenByUser.toggle()
         let wasFirstResponder = passwordField.isFirstResponder
         if wasFirstResponder {
             passwordField.resignFirstResponder()
         }
-        passwordField.isSecureTextEntry.toggle()
-        passwordField.keyboardType = .default
-        passwordField.textContentType = nil
+        passwordField.isSecureTextEntry = wasFirstResponder && passwordHiddenByUser
+        configureLoginFieldKeyboard(passwordField)
         styleField(passwordField)
         updatePasswordToggleAppearance()
         if wasFirstResponder {
@@ -286,7 +299,7 @@ final class PasswordLoginViewController: BaseViewController {
     }
 
     private func updatePasswordToggleAppearance() {
-        let hidden = passwordField.isSecureTextEntry
+        let hidden = passwordHiddenByUser
         let name = hidden ? "eye" : "eye.slash"
         passwordToggleButton.setImage(UIImage(systemName: name), for: .normal)
         passwordToggleButton.accessibilityLabel = String(
@@ -642,6 +655,26 @@ final class PasswordLoginViewController: BaseViewController {
 }
 
 extension PasswordLoginViewController: UITextFieldDelegate {
+    func textFieldShouldBeginEditing(_ textField: UITextField) -> Bool {
+        if textField === passwordField {
+            passwordField.isSecureTextEntry = passwordHiddenByUser
+            configureLoginFieldKeyboard(passwordField)
+        } else {
+            passwordField.isSecureTextEntry = false
+            configureLoginFieldKeyboard(passwordField)
+        }
+        updatePasswordToggleAppearance()
+        return true
+    }
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        if textField === passwordField {
+            passwordField.isSecureTextEntry = false
+            configureLoginFieldKeyboard(passwordField)
+        }
+        updatePasswordToggleAppearance()
+    }
+
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
         if textField === identifierField {
             passwordField.becomeFirstResponder()

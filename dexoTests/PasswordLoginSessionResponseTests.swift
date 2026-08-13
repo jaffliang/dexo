@@ -35,6 +35,36 @@ final class PasswordLoginSessionResponseTests: XCTestCase {
         )
     }
 
+    func testInvalidSecondFactorMethodWithTotpEnabledNeedsSecondFactor() {
+        let body = #"{"error":"所选双重身份验证方法无效。","reason":"invalid_second_factor_method","totp_enabled":true,"backup_enabled":false,"security_key_enabled":false}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .needsSecondFactor
+        )
+    }
+
+    func testInvalidSecondFactorMethodWithTotpOmittedNeedsSecondFactor() {
+        let body = #"{"error":"所选双重身份验证方法无效。","reason":"invalid_second_factor_method"}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .needsSecondFactor
+        )
+    }
+
+    func testInvalidSecondFactorMethodWithTotpDisabledIsFailure() {
+        let body = #"{"error":"所选双重身份验证方法无效。","reason":"invalid_second_factor_method","totp_enabled":false}"#
+        switch PasswordLoginSessionResponse.interpret(status: 200, body: body) {
+        case .needsSecondFactor:
+            XCTFail("must not prompt for TOTP when totp_enabled is false")
+        case .failed(let status, let text):
+            XCTAssertEqual(status, 200)
+            XCTAssertTrue(text.contains("所选双重身份验证方法无效"), text)
+            XCTAssertTrue(text.contains("invalid_second_factor_method"), text)
+        default:
+            XCTFail("expected failed outcome, not signed-in or invalid credentials")
+        }
+    }
+
     func testReasonSecondFactorRequiresCode() {
         let body = #"{"error":"Please enter your authentication code","reason":"second_factor"}"#
         XCTAssertEqual(
@@ -234,6 +264,25 @@ final class PasswordLoginJavaScriptProtocolTests: XCTestCase {
             PasswordLoginConfig.idcflare.subtitleHost(for: "not-a-url"),
             "idcflare.com"
         )
+    }
+
+    func testLoginJavaScriptSendsSecondFactorMethodOnlyWithToken() {
+        let js = PasswordLoginWebSession.loginJavaScript(config: .linuxDo)
+        XCTAssertTrue(
+            js.contains("var form = 'login=' + encodeURIComponent(identifier) + '&password=' + encodeURIComponent(password);"),
+            "first /session.json request must be login+password only"
+        )
+        XCTAssertTrue(js.contains("if (secondFactorToken)"))
+        XCTAssertTrue(js.contains("'&second_factor_token=' + encodeURIComponent(secondFactorToken) + '&second_factor_method=1'"))
+        if let tokenRange = js.range(of: "if (secondFactorToken)") {
+            let beforeToken = js[..<tokenRange.lowerBound]
+            XCTAssertFalse(
+                beforeToken.contains("second_factor_method"),
+                "must not send second_factor_method on the first request"
+            )
+        } else {
+            XCTFail("login JS must gate second_factor fields on the token")
+        }
     }
 
     func testLoginJavaScriptUsesCredentialsIncludeWithoutManualCookieHeaders() {

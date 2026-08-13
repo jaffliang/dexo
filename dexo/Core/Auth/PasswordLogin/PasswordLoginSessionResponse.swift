@@ -14,6 +14,9 @@ enum PasswordLoginSessionResponse {
         var error: String?
         var hasUser: Bool
         var secondFactorRequired: Bool
+        /// Top-level `totp_enabled` from a 2FA challenge payload. `nil` if omitted.
+        /// Do not read `user.totp_enabled` — successful session JSON often has that false.
+        var totpEnabled: Bool?
     }
 
     /// In-place Cloudflare interstitial retry is only for Discourse CSRF 403.
@@ -46,7 +49,13 @@ enum PasswordLoginSessionResponse {
         guard let data = body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return ParsedBody(reason: nil, error: nil, hasUser: false, secondFactorRequired: false)
+            return ParsedBody(
+                reason: nil,
+                error: nil,
+                hasUser: false,
+                secondFactorRequired: false,
+                totpEnabled: nil
+            )
         }
         let reason = trimmedNonEmpty(json["reason"] as? String)
         let error = trimmedNonEmpty(json["error"] as? String)
@@ -56,31 +65,43 @@ enum PasswordLoginSessionResponse {
         } else {
             hasUser = false
         }
-        // Capability flags like `totp_enabled: false` must not count as a challenge.
+        // Capability flags like `user.totp_enabled: false` must not count as a challenge.
+        // Only the top-level 2FA result flag is a real TOTP availability signal.
         let secondFactorRequired = isTruthyFlag(json["second_factor_required"])
         return ParsedBody(
             reason: reason,
             error: error,
             hasUser: hasUser,
-            secondFactorRequired: secondFactorRequired
+            secondFactorRequired: secondFactorRequired,
+            totpEnabled: optionalBoolFlag(json["totp_enabled"])
         )
     }
 
     /// 2FA only from parsed JSON fields — never a raw-body substring.
     /// Successful `/session.json` often includes `"totp_enabled": false` on `user`.
+    ///
+    /// Modern Discourse always runs `authenticate_second_factor` after a valid
+    /// password. With TOTP enabled and no `second_factor_method`, the reason is
+    /// `invalid_second_factor_method` (HTTP 200) — a challenge, not a hard fail.
+    /// If `totp_enabled` is explicitly false, do not prompt for a 6-digit TOTP.
     static func requiresSecondFactor(_ parsed: ParsedBody) -> Bool {
-        if isSecondFactorReason(parsed.reason ?? "") {
-            return true
+        let looksLikeSecondFactor =
+            isSecondFactorReason(parsed.reason ?? "")
+            || parsed.secondFactorRequired
+            || errorRequiresSecondFactor(parsed.error)
+        guard looksLikeSecondFactor else { return false }
+        if parsed.totpEnabled == false {
+            return false
         }
-        if parsed.secondFactorRequired {
-            return true
-        }
-        return errorRequiresSecondFactor(parsed.error)
+        return true
     }
 
     static func isSecondFactorReason(_ reason: String) -> Bool {
         switch reason.lowercased() {
-        case "second_factor", "invalid_second_factor", "second_factor_required":
+        case "second_factor",
+             "invalid_second_factor",
+             "second_factor_required",
+             "invalid_second_factor_method":
             return true
         default:
             return false
@@ -109,6 +130,11 @@ enum PasswordLoginSessionResponse {
     }
 
     private static func isTruthyFlag(_ value: Any?) -> Bool {
+        optionalBoolFlag(value) == true
+    }
+
+    private static func optionalBoolFlag(_ value: Any?) -> Bool? {
+        guard let value, !(value is NSNull) else { return nil }
         if let flag = value as? Bool {
             return flag
         }
@@ -117,9 +143,10 @@ enum PasswordLoginSessionResponse {
         }
         if let string = value as? String {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return trimmed == "true" || trimmed == "1" || trimmed == "yes"
+            if trimmed == "true" || trimmed == "1" || trimmed == "yes" { return true }
+            if trimmed == "false" || trimmed == "0" || trimmed == "no" { return false }
         }
-        return false
+        return nil
     }
 
     private static func displayBody(status: Int, parsed: ParsedBody, raw: String) -> String {
