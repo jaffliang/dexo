@@ -24,7 +24,11 @@ jobs:
 
       - name: Set build number
         id: buildnumber
-        run: echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        run: |
+          BUILD="${{ github.run_number }}"
+          PADDED=$(printf '%03d' "$BUILD")
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "padded=${PADDED}" >> "$GITHUB_OUTPUT"
 
       - name: Build unsigned archive
         run: |
@@ -57,9 +61,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v${{ steps.version.outputs.version }}-build.${{ steps.buildnumber.outputs.build }}"
+          TAG="v${{ steps.version.outputs.version }}-build.${{ steps.buildnumber.outputs.padded }}"
           git tag "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" build/dexo-unsigned.ipa \
             --title "Dexo $TAG" \
-            --generate-notes
+            --generate-notes \
+            --latest

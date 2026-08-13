@@ -253,7 +253,6 @@ final class PasswordLoginViewController: BaseViewController {
         tf.autocorrectionType = .no
         // `.username` / `.password` (and asciiCapable) pull the system
         // autofill keyboard and block third-party IMEs such as Sogou.
-        // `textContentType` is IUO: `.none` here is Optional.none (no UIKit `.none`).
         tf.keyboardType = .default
         tf.textContentType = nil
         tf.borderStyle = .none
