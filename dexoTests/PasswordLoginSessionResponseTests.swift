@@ -160,6 +160,25 @@ final class PasswordLoginJavaScriptProtocolTests: XCTestCase {
         XCTAssertTrue(js.contains(encoded), "login JS must embed both create endpoints in order: \(encoded)")
     }
 
+    func testOriginPrimeURLIsSameOriginRobotsTxtForEachPasswordLoginHost() {
+        XCTAssertEqual(
+            PasswordLoginWebSession.originPrimeURL(for: URL(string: "https://linux.do")!),
+            URL(string: "https://linux.do/robots.txt")
+        )
+        XCTAssertEqual(
+            PasswordLoginWebSession.originPrimeURL(for: URL(string: "https://idcflare.com")!),
+            URL(string: "https://idcflare.com/robots.txt")
+        )
+        XCTAssertEqual(
+            PasswordLoginWebSession.originPrimeURL(for: URL(string: "https://idcflare.com/login")!),
+            URL(string: "https://idcflare.com/robots.txt")
+        )
+        XCTAssertNotEqual(
+            PasswordLoginWebSession.originPrimeURL(for: URL(string: "https://idcflare.com")!),
+            URL(string: "https://linux.do/robots.txt")
+        )
+    }
+
     func testIdcflarePasswordLoginConfigUsesOwnSiteKeyAndLoginInterstitial() throws {
         let config = try XCTUnwrap(PasswordLoginConfig.config(for: "https://idcflare.com/"))
         XCTAssertEqual(config.host, "idcflare.com")
