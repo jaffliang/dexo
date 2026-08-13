@@ -1,5 +1,5 @@
+@preconcurrency import WebKit
 import UIKit
-import WebKit
 
 nonisolated struct PasswordLoginBridgeResult: Sendable {
     let phase: String
@@ -94,19 +94,65 @@ private nonisolated final class PasswordLoginScriptBridge: NSObject, WKScriptMes
     }
 }
 
+/// WebKit delivers `WKUIDelegate` / `WKNavigationDelegate` callbacks off the main
+/// actor on iOS 15. `createWebViewWith` must return a `WKWebView` synchronously;
+/// a MainActor-isolated session cannot hop without deadlock/crash.
+private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WKUIDelegate, WKNavigationDelegate, @unchecked Sendable {
+    weak var session: PasswordLoginWebSession?
+
+    init(session: PasswordLoginWebSession) {
+        self.session = session
+        super.init()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        // Must construct with WebKit's configuration on this thread and return
+        // immediately. Do not hop to MainActor before the return.
+        let popup = WKWebView(frame: .zero, configuration: configuration)
+        popup.navigationDelegate = self
+        popup.uiDelegate = self
+        PasswordLoginCrashBreadcrumb.record(.popupCreate)
+        Task { @MainActor [weak session] in
+            session?.attachPopup(popup, over: webView)
+        }
+        return popup
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        PasswordLoginCrashBreadcrumb.record(.popupClose)
+        Task { @MainActor [weak session] in
+            session?.dismissPopup(webView)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        completionHandler(.performDefaultHandling, nil)
+    }
+}
+
 /// WKWebView session that runs csrf → hCaptcha create → session.json with browser TLS.
 @MainActor
-final class PasswordLoginWebSession: NSObject {
+final class PasswordLoginWebSession {
     private let forum: ForumInstance
     private let config: PasswordLoginConfig
     private let baseURL: URL
 
     private var webView: WKWebView?
     private var popupWebViews: [WKWebView] = []
+    private var dismissedPopupIDs: Set<ObjectIdentifier> = []
     private var hostController: UIViewController?
-    private var proxyLease: AnyObject?
-    private var trustEvaluator: WebViewProxyTrustEvaluator?
     private var scriptBridge: PasswordLoginScriptBridge?
+    private var webDelegate: PasswordLoginWebViewDelegateBridge?
     private var resultContinuation: CheckedContinuation<PasswordLoginBridgeResult, Error>?
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var captchaContinuation: CheckedContinuation<String, Error>?
@@ -118,7 +164,6 @@ final class PasswordLoginWebSession: NSObject {
         self.config = config
         let trimmed = forum.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.baseURL = URL(string: trimmed) ?? URL(string: "https://\(config.host)")!
-        super.init()
     }
 
     func start(attachedTo presenter: UIViewController, embedIn container: UIView) async throws {
@@ -137,13 +182,14 @@ final class PasswordLoginWebSession: NSObject {
             forMainFrameOnly: true
         ))
 
-        // Keep the non-persistent jar; still route through DoH when enabled.
-        proxyLease = try? await WebViewDoHConfigurator.configurePreservingDataStore(wkConfig)
-        trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+        // Plain networking: hCaptcha / related CDNs must not go through the
+        // app DoH MITM tunnel (no-op on iOS 15, crashy under challenge traffic later).
+        let webDelegate = PasswordLoginWebViewDelegateBridge(session: self)
+        self.webDelegate = webDelegate
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
+        webView.navigationDelegate = webDelegate
+        webView.uiDelegate = webDelegate
         webView.isOpaque = false
         webView.backgroundColor = ThemeManager.shared.cardBackgroundColor
         webView.scrollView.isScrollEnabled = true
@@ -208,20 +254,31 @@ final class PasswordLoginWebSession: NSObject {
         let captchaJS = hCaptchaToken.map(Self.jsString) ?? "null"
         let totpJS = secondFactorToken.map(Self.jsString) ?? "null"
         let script = "window.__dexoPasswordLogin(\(idJS), \(pwJS), \(captchaJS), \(totpJS));"
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PasswordLoginBridgeResult, Error>) in
-            self.resultContinuation = cont
-            webView.evaluateJavaScript(script) { [weak self] _, error in
-                guard let error else { return }
-                Task { @MainActor [weak self] in
-                    self?.takeResultContinuation()?.resume(
-                        throwing: PasswordLoginError.unexpected(
+        PasswordLoginCrashBreadcrumb.record(.loginJsStart)
+        do {
+            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PasswordLoginBridgeResult, Error>) in
+                self.resultContinuation = cont
+                webView.evaluateJavaScript(script) { [weak self] _, error in
+                    guard let error else { return }
+                    Task { @MainActor [weak self] in
+                        let wrapped = PasswordLoginError.unexpected(
                             status: 0,
                             phase: "evaluate",
                             body: error.localizedDescription
                         )
-                    )
+                        PasswordLoginCrashBreadcrumb.record(
+                            .loginJsResult,
+                            detail: PasswordLoginCrashBreadcrumb.shortError(wrapped)
+                        )
+                        self?.takeResultContinuation()?.resume(throwing: wrapped)
+                    }
                 }
             }
+        } catch PasswordLoginError.canceled {
+            throw error
+        } catch {
+            PasswordLoginCrashBreadcrumb.recordError(error)
+            throw error
         }
     }
 
@@ -244,6 +301,7 @@ final class PasswordLoginWebSession: NSObject {
             from: webView.configuration.websiteDataStore,
             matchingHost: host
         )
+        PasswordLoginCrashBreadcrumb.record(.exportCookies, detail: "count=\(cookies.count)")
         guard cookies.contains(where: { $0.name == "_t" }) else {
             throw PasswordLoginError.missingSessionCookie
         }
@@ -252,10 +310,13 @@ final class PasswordLoginWebSession: NSObject {
     }
 
     func tearDown() {
+        PasswordLoginCrashBreadcrumb.record(.teardown)
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
         scriptBridge?.session = nil
         scriptBridge = nil
+        webDelegate?.session = nil
+        webDelegate = nil
         dismissAllPopups()
         if let webView {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "dexoPasswordLogin")
@@ -267,8 +328,6 @@ final class PasswordLoginWebSession: NSObject {
         }
         hostController = nil
         webView = nil
-        proxyLease = nil
-        trustEvaluator = nil
         pendingCaptchaToken = nil
         takeReadyContinuation()?.resume(throwing: PasswordLoginError.canceled)
         takeResultContinuation()?.resume(throwing: PasswordLoginError.canceled)
@@ -282,20 +341,36 @@ final class PasswordLoginWebSession: NSObject {
             readyTimeoutTask = nil
             takeReadyContinuation()?.resume()
         case .captchaToken(let token):
-            dismissAllPopups()
+            PasswordLoginCrashBreadcrumb.record(
+                .captchaToken,
+                detail: PasswordLoginCrashBreadcrumb.redactToken(token)
+            )
             if let continuation = takeCaptchaContinuation() {
                 continuation.resume(returning: token)
             } else {
                 pendingCaptchaToken = token
             }
+            // Never tear down WebKit while the JS→native bridge is still unwinding.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.dismissAllPopups()
+            }
         case .captchaError:
+            PasswordLoginCrashBreadcrumb.record(.captchaError)
             takeCaptchaContinuation()?.resume(throwing: PasswordLoginError.captchaFailed)
         case .login(let result):
+            PasswordLoginCrashBreadcrumb.record(
+                .loginJsResult,
+                detail: "phase=\(result.phase) status=\(result.status)"
+            )
             takeResultContinuation()?.resume(returning: result)
         case .loginParseError(let raw):
-            takeResultContinuation()?.resume(
-                throwing: PasswordLoginError.unexpected(status: 0, phase: "parse", body: raw)
+            let wrapped = PasswordLoginError.unexpected(status: 0, phase: "parse", body: raw)
+            PasswordLoginCrashBreadcrumb.record(
+                .loginJsResult,
+                detail: PasswordLoginCrashBreadcrumb.shortError(wrapped)
             )
+            takeResultContinuation()?.resume(throwing: wrapped)
         case .ignored:
             break
         }
@@ -319,9 +394,9 @@ final class PasswordLoginWebSession: NSObject {
         return pending
     }
 
-    private func attachPopup(_ popup: WKWebView, over parent: WKWebView) {
-        popup.navigationDelegate = self
-        popup.uiDelegate = self
+    fileprivate func attachPopup(_ popup: WKWebView, over parent: WKWebView) {
+        let id = ObjectIdentifier(popup)
+        guard !dismissedPopupIDs.contains(id) else { return }
         popup.customUserAgent = parent.customUserAgent
         popup.isOpaque = false
         popup.backgroundColor = ThemeManager.shared.cardBackgroundColor
@@ -340,7 +415,8 @@ final class PasswordLoginWebSession: NSObject {
         popupWebViews.append(popup)
     }
 
-    private func dismissPopup(_ webView: WKWebView) {
+    fileprivate func dismissPopup(_ webView: WKWebView) {
+        dismissedPopupIDs.insert(ObjectIdentifier(webView))
         guard let index = popupWebViews.firstIndex(of: webView) else { return }
         popupWebViews.remove(at: index)
         webView.navigationDelegate = nil
@@ -348,8 +424,9 @@ final class PasswordLoginWebSession: NSObject {
         webView.removeFromSuperview()
     }
 
-    private func dismissAllPopups() {
+    fileprivate func dismissAllPopups() {
         for popup in popupWebViews {
+            dismissedPopupIDs.insert(ObjectIdentifier(popup))
             popup.navigationDelegate = nil
             popup.uiDelegate = nil
             popup.removeFromSuperview()
@@ -483,34 +560,3 @@ final class PasswordLoginWebSession: NSObject {
     }
 }
 
-extension PasswordLoginWebSession: WKNavigationDelegate, WKUIDelegate {
-    func webView(
-        _ webView: WKWebView,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        if let credential = trustEvaluator?.credential(for: challenge) {
-            completionHandler(.useCredential, credential)
-            return
-        }
-        completionHandler(.performDefaultHandling, nil)
-    }
-
-    func webView(
-        _ webView: WKWebView,
-        createWebViewWith configuration: WKWebViewConfiguration,
-        for navigationAction: WKNavigationAction,
-        windowFeatures: WKWindowFeatures
-    ) -> WKWebView? {
-        guard navigationAction.targetFrame == nil else { return nil }
-        // Must use WebKit's configuration (shared process pool / data store).
-        // Loading the popup request into the captcha WKWebView would destroy the widget.
-        let popup = WKWebView(frame: .zero, configuration: configuration)
-        attachPopup(popup, over: webView)
-        return popup
-    }
-
-    func webViewDidClose(_ webView: WKWebView) {
-        dismissPopup(webView)
-    }
-}

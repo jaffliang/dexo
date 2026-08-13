@@ -3055,6 +3055,38 @@
         }
       }
     },
+    "password_login.debug.breadcrumb_hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previous password login stopped unexpectedly. Tap to copy details."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次密码登录意外中断。点此复制详情。"
+          }
+        }
+      }
+    },
+    "password_login.debug.breadcrumb_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last login interrupted"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次登录中断"
+          }
+        }
+      }
+    },
     "password_login.error.canceled" : {
       "localizations" : {
         "en" : {
