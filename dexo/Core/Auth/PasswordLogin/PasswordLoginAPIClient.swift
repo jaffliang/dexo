@@ -190,12 +190,12 @@ enum PasswordLoginAPIClient {
                     "application/x-www-form-urlencoded",
                     forHTTPHeaderField: "Content-Type"
                 )
-                let body = Data(hCaptchaFormBody(token: token).utf8)
-                request.httpBody = body
-                request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+                let bodyData = Data(hCaptchaFormBody(token: token).utf8)
+                request.httpBody = bodyData
+                request.setValue(String(bodyData.count), forHTTPHeaderField: "Content-Length")
                 let (data, http) = try await perform(request, session: session, cookieURL: url)
-                let body = String(data: data, encoding: .utf8) ?? ""
-                last = (url.path, http.statusCode, body)
+                let bodyText = String(data: data, encoding: .utf8) ?? ""
+                last = (url.path, http.statusCode, bodyText)
                 if http.statusCode == 200 {
                     return nil
                 }
@@ -239,18 +239,18 @@ enum PasswordLoginAPIClient {
                 "application/x-www-form-urlencoded",
                 forHTTPHeaderField: "Content-Type"
             )
-            let body = Data(
+            let bodyData = Data(
                 sessionFormBody(
                     identifier: identifier,
                     password: password,
                     secondFactorToken: secondFactorToken
                 ).utf8
             )
-            request.httpBody = body
-            request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+            request.httpBody = bodyData
+            request.setValue(String(bodyData.count), forHTTPHeaderField: "Content-Length")
             let (data, http) = try await perform(request, session: session, cookieURL: url)
-            let body = String(data: data, encoding: .utf8) ?? ""
-            return PasswordLoginBridgeResult(phase: "session", status: http.statusCode, body: body)
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            return PasswordLoginBridgeResult(phase: "session", status: http.statusCode, body: bodyText)
         } catch {
             return PasswordLoginBridgeResult(
                 phase: "exception",
