@@ -30,6 +30,7 @@ final class SearchViewModel {
     var canLoadMore = false
     var hasSearched = false
     var errorMessage: String?
+    var requiresChallenge = false
 
     var categories: [DiscourseCategory] = []
     var selectedCategoryId: Int?
@@ -82,6 +83,8 @@ final class SearchViewModel {
         guard !query.isEmpty else {
             searchResults = []
             hasSearched = false
+            errorMessage = nil
+            requiresChallenge = false
             return
         }
 
@@ -90,6 +93,7 @@ final class SearchViewModel {
         currentPage = 0
         hasSearched = true
         errorMessage = nil
+        requiresChallenge = false
 
         do {
             let result = try await api.search(term: query, page: 0)
@@ -100,7 +104,9 @@ final class SearchViewModel {
             searchResults = []
             topicsById = [:]
             canLoadMore = false
-            errorMessage = error.localizedDescription
+            let failure = GuestContentLoadFailure(error)
+            requiresChallenge = failure.requiresChallenge
+            errorMessage = failure.message
         }
         isSearching = false
     }

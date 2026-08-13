@@ -968,6 +968,38 @@
         }
       }
     },
+    "challenge.empty.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This forum is protected by Cloudflare. Pass the challenge to continue browsing."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此论坛受到 Cloudflare 保护。过盾后即可继续浏览。"
+          }
+        }
+      }
+    },
+    "challenge.pass_button" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pass Cloudflare"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "过盾"
+          }
+        }
+      }
+    },
     "challenge.prompt.message" : {
       "localizations" : {
         "en" : {

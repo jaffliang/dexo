@@ -422,9 +422,10 @@ final class DiscourseAPI {
         var headers = HTTPHeaders()
 
         // The add-forum probe runs before a ForumInstance or the web-auth
-        // sentinel exists in Keychain. Explicitly carry the cookies captured
-        // by ChallengeViewController for that first request instead of
-        // relying on the authenticated-request interceptor path.
+        // sentinel exists in Keychain. Explicitly carry cookies captured by
+        // ChallengeViewController so the first request still works if the
+        // interceptor path is skipped. Guest feed/topic loads now get the
+        // same headers from DiscourseAuthInterceptor without an API key.
         if includeStoredWebCookies,
            let url = URL(string: baseURL + route.path)
         {
@@ -993,9 +994,7 @@ final class DiscourseAPI {
         guard let url = URL(string: baseURL) else { return nil }
         var req = URLRequest(url: url)
         req.setValue("text/html", forHTTPHeaderField: "Accept")
-        let cookieHeader = WebCookieStore.shared.cookieHeader(for: url)
-        if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
-        if let ua = WebCookieStore.shared.userAgent { req.setValue(ua, forHTTPHeaderField: "User-Agent") }
+        WebCookieStore.shared.applySessionHeaders(to: &req)
         let response = await session.request(req).serializingData().response
         if authenticationFailureError(
             statusCode: response.response?.statusCode,
@@ -1158,10 +1157,12 @@ final class DiscourseAPI {
         // (proxy 5xx, partial replies, session-expired 403s) can carry Set-Cookie directives
         // that would clobber the `_t` session cookie and log the user out silently.
         if let httpResponse = response.response, let url = httpResponse.url,
-           let statusCode = response.response?.statusCode, (200 ..< 300).contains(statusCode),
-           KeychainHelper.getUserApiKey(for: baseURL) == AuthManager.webAuthSentinel
+           let statusCode = response.response?.statusCode, (200 ..< 300).contains(statusCode)
         {
-            WebCookieStore.shared.mergeResponseHeaders(httpResponse.allHeaderFields, for: url)
+            let apiKey = KeychainHelper.getUserApiKey(for: baseURL)
+            if apiKey == nil || apiKey == AuthManager.webAuthSentinel {
+                WebCookieStore.shared.mergeResponseHeaders(httpResponse.allHeaderFields, for: url)
+            }
         }
 
         if isCloudflareChallengeResponse(response.data) {
@@ -1330,17 +1331,12 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         }
 
         var request = urlRequest
+        // Guest linux.do browsing has no API key and no web-auth sentinel, but
+        // still needs `cf_clearance` plus the WKWebView User-Agent after the
+        // user passes the Cloudflare challenge.
+        WebCookieStore.shared.applySessionHeaders(to: &request)
         if let userApiKey = KeychainHelper.getUserApiKey(for: baseURL) {
             if userApiKey == AuthManager.webAuthSentinel {
-                if let url = request.url {
-                    let header = WebCookieStore.shared.cookieHeader(for: url)
-                    if !header.isEmpty {
-                        request.setValue(header, forHTTPHeaderField: "Cookie")
-                    }
-                    if let ua = WebCookieStore.shared.userAgent {
-                        request.setValue(ua, forHTTPHeaderField: "User-Agent")
-                    }
-                }
                 let isMutating = request.httpMethod == "POST" || request.httpMethod == "PUT" || request.httpMethod == "DELETE"
                 if isMutating {
                     if request.value(forHTTPHeaderField: "Accept") == nil {
@@ -1455,9 +1451,7 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         }
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        let cookieHeader = WebCookieStore.shared.cookieHeader(for: url)
-        if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
-        if let ua = WebCookieStore.shared.userAgent { req.setValue(ua, forHTTPHeaderField: "User-Agent") }
+        WebCookieStore.shared.applySessionHeaders(to: &req)
         session.request(req).responseData { response in
             guard let data = response.data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

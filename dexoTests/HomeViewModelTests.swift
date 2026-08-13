@@ -61,6 +61,32 @@ final class HomeViewModelTests: XCTestCase {
         ])
     }
 
+    func testChallengeRequiredShowsLocalizedEmptyStateInsteadOfRawEnglish() async {
+        let api = MockHomeFeedAPI()
+        api.challengeFailures.insert(api.key(.activity, 0))
+        let viewModel = HomeViewModel(api: api)
+
+        await viewModel.loadTopics()
+
+        XCTAssertTrue(viewModel.requiresChallenge)
+        XCTAssertFalse(viewModel.requiresLogin)
+        XCTAssertTrue(viewModel.topics.isEmpty)
+        XCTAssertEqual(viewModel.errorMessage, String(localized: "challenge.empty.message"))
+        XCTAssertNotEqual(viewModel.errorMessage, "Cloudflare challenge required")
+    }
+
+    func testNotLoggedInStillRequiresLoginAndDoesNotShowChallenge() async {
+        let api = MockHomeFeedAPI()
+        api.loginFailures.insert(api.key(.activity, 0))
+        let viewModel = HomeViewModel(api: api)
+
+        await viewModel.loadTopics()
+
+        XCTAssertTrue(viewModel.requiresLogin)
+        XCTAssertFalse(viewModel.requiresChallenge)
+        XCTAssertEqual(viewModel.errorMessage, "You need to log in")
+    }
+
     private func topicList(ids: [Int], hasMore: Bool = false) throws -> DiscourseTopicList {
         let topics = ids.map { id in
             """
@@ -96,6 +122,8 @@ private final class MockHomeFeedAPI: HomeFeedAPIClient {
 
     var responses: [String: DiscourseTopicList] = [:]
     var failures = Set<String>()
+    var challengeFailures = Set<String>()
+    var loginFailures = Set<String>()
     var topicFeedCalls: [Call] = []
     var delayActivityPageZero = false
     var delayedContinuation: CheckedContinuation<DiscourseTopicList, any Error>?
@@ -112,6 +140,18 @@ private final class MockHomeFeedAPI: HomeFeedAPIClient {
             }
         }
         let requestKey = key(mode, page)
+        if challengeFailures.contains(requestKey) {
+            throw DiscourseAPIError(
+                messages: ["Cloudflare challenge required"],
+                errorType: "challenge_required"
+            )
+        }
+        if loginFailures.contains(requestKey) {
+            throw DiscourseAPIError(
+                messages: ["You need to log in"],
+                errorType: "not_logged_in"
+            )
+        }
         if failures.contains(requestKey) { throw Failure.requested }
         return try XCTUnwrap(responses[requestKey])
     }

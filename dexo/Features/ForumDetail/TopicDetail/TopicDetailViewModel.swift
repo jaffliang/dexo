@@ -48,6 +48,9 @@ final class TopicDetailViewModel {
     var collapsedPostIds: Set<Int> = []
     var expandedBoostPostIds: Set<Int> = []
     var errorMessage: String?
+    /// True when the initial topic load was blocked by Cloudflare and the
+    /// empty-state "Pass Cloudflare" button should be shown.
+    var requiresChallenge = false
     /// Raw error from the last topic load — surfaced so the VC can route
     /// Cloudflare-challenge cases into the auth prompt instead of just
     /// rendering the message string. Cleared on each new `loadTopic` call.
@@ -609,6 +612,7 @@ final class TopicDetailViewModel {
         isReady = false
         errorMessage = nil
         lastLoadError = nil
+        requiresChallenge = false
         loadMoreFailed = false
         parsedBlocks = [:]
         renderDocuments = [:]
@@ -723,8 +727,7 @@ final class TopicDetailViewModel {
         } catch {
             guard loadGeneration == expectedGeneration else { return }
             debugLog("[TopicDetail] Nested load failed: \(error)")
-            errorMessage = error.localizedDescription
-            lastLoadError = error
+            recordInitialLoadFailure(error)
         }
 
         guard loadGeneration == expectedGeneration else { return }
@@ -900,6 +903,7 @@ final class TopicDetailViewModel {
         isReady = false
         errorMessage = nil
         lastLoadError = nil
+        requiresChallenge = false
         loadMoreFailed = false
         parsedBlocks = [:]
         renderDocuments = [:]
@@ -974,12 +978,18 @@ final class TopicDetailViewModel {
         } catch {
             guard loadGeneration == expectedGeneration else { return }
             debugLog("[TopicDetail] Load failed: \(error)")
-            errorMessage = error.localizedDescription
-            lastLoadError = error
+            recordInitialLoadFailure(error)
         }
 
         guard loadGeneration == expectedGeneration else { return }
         isLoading = false
+    }
+
+    private func recordInitialLoadFailure(_ error: Error) {
+        lastLoadError = error
+        let failure = GuestContentLoadFailure(error)
+        requiresChallenge = failure.requiresChallenge
+        errorMessage = failure.message
     }
 
     /// Flip "by heat" mode and re-fetch the topic with `filter=summary`.

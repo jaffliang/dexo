@@ -8,6 +8,7 @@ final class CategoriesViewModel {
     var isLoading = false
     var errorMessage: String?
     var requiresLogin = false
+    var requiresChallenge = false
 
     private let api: DiscourseAPI
 
@@ -19,14 +20,15 @@ final class CategoriesViewModel {
         isLoading = true
         errorMessage = nil
         requiresLogin = false
+        requiresChallenge = false
         do {
             let result = try await api.fetchAllCategories(forceRefresh: forceRefresh)
             categories = result.categoryList.categories.filter { $0.parentCategoryId == nil }
         } catch {
-            if let apiError = error as? DiscourseAPIError, apiError.isNotLoggedIn || apiError.isForbidden {
-                requiresLogin = true
-            }
-            errorMessage = error.localizedDescription
+            let failure = GuestContentLoadFailure(error)
+            requiresLogin = failure.requiresLogin
+            requiresChallenge = failure.requiresChallenge
+            errorMessage = failure.message
         }
         isLoading = false
     }

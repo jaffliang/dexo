@@ -25,6 +25,7 @@ final class HomeViewModel {
     var canLoadMore = false
     var errorMessage: String?
     var requiresLogin = false
+    var requiresChallenge = false
 
     var categories: [DiscourseCategory] = []
     private(set) var selectedCategoryId: Int?
@@ -93,6 +94,7 @@ final class HomeViewModel {
         isLoading = true
         errorMessage = nil
         requiresLogin = false
+        requiresChallenge = false
         defer {
             if isCurrentRequest(
                 generation: generation,
@@ -135,10 +137,10 @@ final class HomeViewModel {
                 categoryId: requestedCategoryId
             ) else { return }
 
-            if let apiError = error as? DiscourseAPIError, apiError.isNotLoggedIn || apiError.isForbidden {
-                requiresLogin = true
-            }
-            errorMessage = error.localizedDescription
+            let failure = GuestContentLoadFailure(error)
+            requiresLogin = failure.requiresLogin
+            requiresChallenge = failure.requiresChallenge
+            errorMessage = failure.message
         }
     }
 
@@ -221,6 +223,7 @@ final class HomeViewModel {
         selectedCategoryId = nil
         errorMessage = nil
         requiresLogin = false
+        requiresChallenge = false
         await loadTopics()
     }
 
@@ -259,6 +262,7 @@ final class HomeViewModel {
         usersById.removeAll()
         errorMessage = nil
         requiresLogin = false
+        requiresChallenge = false
     }
 
     private func isCurrentRequest(

@@ -121,6 +121,8 @@ final class HomeViewController: ObservableViewController {
         return button
     }()
 
+    private let challengeButton = GuestChallengeUI.makePassButton()
+
     private let composeButtonSize: CGFloat = 56
     private let composeButtonEdgeMargin: CGFloat = 20
     private var composeDragDistance: CGFloat = 0
@@ -224,6 +226,7 @@ final class HomeViewController: ObservableViewController {
         view.addSubview(activityIndicator)
         view.addSubview(errorLabel)
         view.addSubview(loginButton)
+        view.addSubview(challengeButton)
 
         NSLayoutConstraint.activate([
             tableView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -241,9 +244,13 @@ final class HomeViewController: ObservableViewController {
 
             loginButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             loginButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
+
+            challengeButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            challengeButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
         ])
 
         loginButton.addTarget(self, action: #selector(loginTapped), for: .touchUpInside)
+        challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(authDidChange(_:)),
@@ -259,7 +266,7 @@ final class HomeViewController: ObservableViewController {
         composeButton.frame = CGRect(x: 0, y: 0, width: composeButtonSize, height: composeButtonSize)
 
         Task {
-            await viewModel.loadTopics()
+            await loadTopicsAndOfferChallenge()
         }
         Task {
             await api.loadOrFetchEmojiMap()
@@ -288,6 +295,13 @@ final class HomeViewController: ObservableViewController {
         updateUI()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        Task {
+            await autoPresentGuestChallengeIfNeeded()
+        }
+    }
+
     override func updateUI() {
         _ = AppSettings.shared.localBlocklistRevision
         // Login-required state
@@ -295,6 +309,7 @@ final class HomeViewController: ObservableViewController {
             errorLabel.text = viewModel.errorMessage
             errorLabel.isHidden = false
             loginButton.isHidden = false
+            challengeButton.isHidden = true
             tableView.isHidden = true
             navigationItem.rightBarButtonItems = inheritedRightBarItems
             activityIndicator.stopAnimating()
@@ -308,13 +323,19 @@ final class HomeViewController: ObservableViewController {
         categoryButton.menu = UIMenu(title: "", children: buildCategoryMenuElements())
         sortBarButton.menu = buildSortMenu()
         updateCategoryButton()
-        // Show non-login errors (e.g. rate limit) when topic list is empty
+        // Show non-login errors (e.g. rate limit, Cloudflare) when topic list is empty
         if let error = viewModel.errorMessage, viewModel.topics.isEmpty {
             errorLabel.text = error
             errorLabel.isHidden = false
         } else {
             errorLabel.isHidden = true
         }
+        challengeButton.isHidden = !(
+            viewModel.requiresChallenge
+                && api.isLinuxDo
+                && viewModel.topics.isEmpty
+                && !viewModel.isLoading
+        )
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
         snapshot.appendSections([0])
@@ -496,6 +517,26 @@ final class HomeViewController: ObservableViewController {
         // performs one complete categories + topics reload with the new
         // credential.
         authGate?.requireAuth {}
+    }
+
+    @objc private func challengeTapped() {
+        presentGuestChallengeThenRetry(on: api) { [weak self] in
+            await self?.viewModel.loadTopics()
+        }
+    }
+
+    private func loadTopicsAndOfferChallenge() async {
+        await viewModel.loadTopics()
+        await autoPresentGuestChallengeIfNeeded()
+    }
+
+    private func autoPresentGuestChallengeIfNeeded() async {
+        await presentGuestChallengeAutomaticallyIfNeeded(
+            on: api,
+            isChallengeRequired: viewModel.requiresChallenge
+        ) { [weak self] in
+            await self?.viewModel.loadTopics()
+        }
     }
 
     @objc private func authDidChange(_ notification: Notification) {

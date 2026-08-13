@@ -8,6 +8,8 @@ private final class CategoryTopicsViewModel {
     var isLoading = false
     var isLoadingMore = false
     var canLoadMore = false
+    var errorMessage: String?
+    var requiresChallenge = false
 
     private let api: DiscourseAPI
     private let slug: String
@@ -37,13 +39,17 @@ private final class CategoryTopicsViewModel {
     func loadTopics() async {
         isLoading = true
         currentPage = 0
+        errorMessage = nil
+        requiresChallenge = false
         do {
             let result = try await api.fetchCategoryTopics(slug: slug, id: categoryId, page: 0)
             topics = result.topicList.topics
             canLoadMore = result.topicList.moreTopicsUrl != nil
             indexUsers(result.users)
         } catch {
-            // Error silently handled for now
+            let failure = GuestContentLoadFailure(error)
+            requiresChallenge = failure.requiresChallenge
+            errorMessage = failure.message
         }
         isLoading = false
     }
@@ -135,6 +141,18 @@ final class CategoryTopicsViewController: ObservableViewController {
         return rc
     }()
 
+    private let errorLabel: UILabel = {
+        let label = UILabel()
+        label.textColor = .secondaryLabel
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.isHidden = true
+        return label
+    }()
+
+    private let challengeButton = GuestChallengeUI.makePassButton()
+
     init(api: DiscourseAPI, category: DiscourseCategory) {
         self.api = api
         self.category = category
@@ -154,6 +172,8 @@ final class CategoryTopicsViewController: ObservableViewController {
 
         view.addSubview(tableView)
         view.addSubview(activityIndicator)
+        view.addSubview(errorLabel)
+        view.addSubview(challengeButton)
 
         NSLayoutConstraint.activate([
             tableView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -163,7 +183,17 @@ final class CategoryTopicsViewController: ObservableViewController {
 
             activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+
+            errorLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            errorLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            errorLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
+            errorLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+
+            challengeButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            challengeButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
         ])
+
+        challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
 
         Task {
             await viewModel.loadTopics()
@@ -216,12 +246,31 @@ final class CategoryTopicsViewController: ObservableViewController {
         } else {
             footerSpinner.stopAnimating()
         }
+
+        if let error = viewModel.errorMessage, viewModel.topics.isEmpty, !viewModel.isLoading {
+            errorLabel.text = error
+            errorLabel.isHidden = false
+        } else {
+            errorLabel.isHidden = true
+        }
+        challengeButton.isHidden = !(
+            viewModel.requiresChallenge
+                && api.isLinuxDo
+                && viewModel.topics.isEmpty
+                && !viewModel.isLoading
+        )
     }
 
     @objc private func pullToRefresh() {
         Task {
             await viewModel.loadTopics()
             refreshControl.endRefreshing()
+        }
+    }
+
+    @objc private func challengeTapped() {
+        presentGuestChallengeThenRetry(on: api) { [weak self] in
+            await self?.viewModel.loadTopics()
         }
     }
 

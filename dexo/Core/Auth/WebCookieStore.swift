@@ -61,6 +61,25 @@ final class WebCookieStore {
         cookies(for: url).map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
+    /// Attaches stored web cookies and the challenge/login User-Agent when the
+    /// request has not already set those headers. Used for guest browsing
+    /// after a Cloudflare challenge as well as web-login sessions.
+    func applySessionHeaders(to request: inout URLRequest) {
+        guard let url = request.url else { return }
+        if request.value(forHTTPHeaderField: "Cookie") == nil {
+            let header = cookieHeader(for: url)
+            if !header.isEmpty {
+                request.setValue(header, forHTTPHeaderField: "Cookie")
+            }
+        }
+        if request.value(forHTTPHeaderField: "User-Agent") == nil,
+           let ua = userAgent,
+           !ua.isEmpty
+        {
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        }
+    }
+
     func mergeResponseHeaders(_ headers: [AnyHashable: Any], for url: URL) {
         var stringHeaders: [String: String] = [:]
         for (k, v) in headers { stringHeaders["\(k)"] = "\(v)" }

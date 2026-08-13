@@ -58,6 +58,8 @@ final class CategoriesViewController: ObservableViewController {
         return button
     }()
 
+    private let challengeButton = GuestChallengeUI.makePassButton()
+
     init(api: DiscourseAPI, authGate: AuthGating? = nil) {
         self.api = api
         self.viewModel = CategoriesViewModel(api: api)
@@ -77,6 +79,7 @@ final class CategoriesViewController: ObservableViewController {
         view.addSubview(activityIndicator)
         view.addSubview(errorLabel)
         view.addSubview(loginButton)
+        view.addSubview(challengeButton)
 
         NSLayoutConstraint.activate([
             tableView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -94,9 +97,13 @@ final class CategoriesViewController: ObservableViewController {
 
             loginButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             loginButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
+
+            challengeButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            challengeButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
         ])
 
         loginButton.addTarget(self, action: #selector(loginTapped), for: .touchUpInside)
+        challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
 
         Task {
             await viewModel.loadCategories()
@@ -108,13 +115,21 @@ final class CategoriesViewController: ObservableViewController {
             errorLabel.text = viewModel.errorMessage
             errorLabel.isHidden = false
             loginButton.isHidden = false
+            challengeButton.isHidden = true
             tableView.isHidden = true
             activityIndicator.stopAnimating()
             return
         }
 
-        errorLabel.isHidden = true
         loginButton.isHidden = true
+        let showChallenge = viewModel.requiresChallenge && api.isLinuxDo && !viewModel.isLoading
+        if showChallenge {
+            errorLabel.text = viewModel.errorMessage
+            errorLabel.isHidden = false
+        } else {
+            errorLabel.isHidden = true
+        }
+        challengeButton.isHidden = !showChallenge
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
         snapshot.appendSections([0])
@@ -144,6 +159,12 @@ final class CategoriesViewController: ObservableViewController {
             Task {
                 await self.viewModel.loadCategories()
             }
+        }
+    }
+
+    @objc private func challengeTapped() {
+        presentGuestChallengeThenRetry(on: api) { [weak self] in
+            await self?.viewModel.loadCategories()
         }
     }
 }
