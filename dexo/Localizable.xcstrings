@@ -3055,6 +3055,70 @@
         }
       }
     },
+    "password_login.debug.breadcrumb_hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previous password login stopped unexpectedly. Tap to copy details."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次密码登录意外中断。点此复制详情。"
+          }
+        }
+      }
+    },
+    "password_login.debug.breadcrumb_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last login interrupted"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次登录中断"
+          }
+        }
+      }
+    },
+    "password_login.debug.exception_hint" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A previous crash was captured. Tap to copy the exception."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已捕获上次崩溃。点此复制异常信息。"
+          }
+        }
+      }
+    },
+    "password_login.debug.exception_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last crash (NSException)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次崩溃（NSException）"
+          }
+        }
+      }
+    },
     "password_login.error.canceled" : {
       "localizations" : {
         "en" : {

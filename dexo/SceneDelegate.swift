@@ -20,7 +20,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {}
-    func sceneDidBecomeActive(_ scene: UIScene) {}
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        guard let root = window?.rootViewController else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            LastFatalExceptionPresenter.presentIfNeeded(from: root)
+        }
+    }
     func sceneWillResignActive(_ scene: UIScene) {}
     func sceneWillEnterForeground(_ scene: UIScene) {
 //        ProxyManager.shared.start()
