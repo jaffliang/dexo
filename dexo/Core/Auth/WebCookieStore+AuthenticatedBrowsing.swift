@@ -14,11 +14,19 @@ extension WebCookieStore {
         cookies(for: Self.familyOriginURL(for: url)).contains { $0.name == "_t" }
     }
 
+    /// True when password/web login stored `_t` for linux.do or idcflare.
+    /// Used by “打开网页” so a non-family OAuth site can still use the WK jar.
+    func hasAnyAuthTokenCookie() -> Bool {
+        cookieEditorExportURLFromJar() != nil
+    }
+
     /// Cookies to write into the shared WK store before load.
     ///
     /// Includes cookies that already apply to `url` (e.g. `Domain=.linux.do`
     /// `cf_clearance`) plus host-only `_t` / `_forum_session` on the
     /// registrable origin so a CDK → linux.do SSO redirect can send them.
+    /// Non-family pages (e.g. `api.coee.ccwu.cc`) also get linux.do / idcflare
+    /// origin cookies so OAuth can bounce to linux.do with host-only `_t`.
     /// Never rewrites `_t` to `Domain=.linux.do`.
     func cookiesForAuthenticatedBrowsing(for url: URL) -> [HTTPCookie] {
         var result: [HTTPCookie] = []
@@ -32,6 +40,13 @@ extension WebCookieStore {
         let origin = Self.familyOriginURL(for: url)
         if origin.host?.lowercased() != url.host?.lowercased() {
             append(cookies(for: origin))
+        }
+        if ForumPolicy.linuxDoFamilyRegistrableHost(forHost: url.host ?? "") == nil {
+            for host in ["linux.do", "idcflare.com"] {
+                if let warmup = URL(string: "https://\(host)/") {
+                    append(cookies(for: warmup))
+                }
+            }
         }
         return result
     }

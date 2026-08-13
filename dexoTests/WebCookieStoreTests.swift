@@ -227,6 +227,31 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertEqual((exportedT.first?["hostOnly"] as? NSNumber)?.boolValue, true)
     }
 
+    func testNonFamilyURLStillPrimesHostOnlyLinuxDoAuthToken() {
+        let origin = URL(string: "https://linux.do/")!
+        let coee = URL(string: "https://api.coee.ccwu.cc/")!
+        let token = HTTPCookie(properties: [
+            .domain: "linux.do",
+            .path: "/",
+            .name: "_t",
+            .value: "sso-host-only",
+            .secure: "TRUE",
+            .expires: Date(timeIntervalSince1970: 1_900_000_000),
+        ])!
+        WebCookieStore.shared.setCookies([token])
+        defer { WebCookieStore.shared.clearCookies(for: "https://linux.do") }
+
+        XCTAssertFalse(WebCookieStore.shared.hasAuthTokenCookie(for: coee))
+        XCTAssertTrue(WebCookieStore.shared.hasAnyAuthTokenCookie())
+
+        let primed = WebCookieStore.shared.cookiesForAuthenticatedBrowsing(for: coee)
+        let tCookies = primed.filter { $0.name == "_t" }
+        XCTAssertEqual(tCookies.count, 1)
+        XCTAssertEqual(tCookies.first?.domain, "linux.do")
+        XCTAssertFalse(tCookies.first?.domain.hasPrefix(".") == true)
+        XCTAssertTrue(WebCookieStore.shared.cookies(for: origin).contains { $0.name == "_t" })
+    }
+
     func testHasAuthTokenCookieRequiresTNotOnlyForumSession() {
         let origin = URL(string: "https://linux.do/")!
         let session = HTTPCookie(properties: [

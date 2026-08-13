@@ -10,11 +10,6 @@ enum ForumPolicy {
     /// trigger site-side anti-bot protection.
     private static let readTimingsOptInHosts: Set<String> = ["linux.do"]
 
-    /// linux.do and sister sites that share Cloudflare guest/password handling.
-    /// Do not send idcflare users to linux.do/challenge — that host's
-    /// `/challenge` is 404; use each forum's own interstitial URL.
-    private static let linuxDoFamilyHosts: Set<String> = ["linux.do", "idcflare.com"]
-
     /// True when posts on this forum should hide the heart / like button.
     static func hidesLikeButton(baseURL: String) -> Bool {
         matches(baseURL: baseURL, hosts: likeButtonSuppressedHosts)
@@ -28,19 +23,25 @@ enum ForumPolicy {
         return AppSettings.shared.linuxDoReadTimingsEnabled
     }
 
+    /// linux.do and sister sites that share Cloudflare guest/password handling.
+    /// Do not send idcflare users to linux.do/challenge — that host's
+    /// `/challenge` is 404; use each forum's own interstitial URL.
     static func isLinuxDoFamily(baseURL: String) -> Bool {
-        matches(baseURL: baseURL, hosts: linuxDoFamilyHosts)
+        guard let host = URL(string: baseURL)?.host else { return false }
+        return linuxDoFamilyRegistrableHost(forHost: host) != nil
     }
 
-    static func isLinuxDoFamily(url: URL) -> Bool {
+    nonisolated static func isLinuxDoFamily(url: URL) -> Bool {
         guard let host = url.host else { return false }
         return linuxDoFamilyRegistrableHost(forHost: host) != nil
     }
 
     /// `linux.do` or `idcflare.com` when `host` is that site or a subdomain.
-    static func linuxDoFamilyRegistrableHost(forHost host: String) -> String? {
+    nonisolated static func linuxDoFamilyRegistrableHost(forHost host: String) -> String? {
         let host = host.lowercased()
-        return linuxDoFamilyHosts.first { host == $0 || host.hasSuffix(".\($0)") }
+        if host == "linux.do" || host.hasSuffix(".linux.do") { return "linux.do" }
+        if host == "idcflare.com" || host.hasSuffix(".idcflare.com") { return "idcflare.com" }
+        return nil
     }
 
     /// Default URL for the in-app browser prompt. linux.do defaults to CDK

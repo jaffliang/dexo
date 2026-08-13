@@ -12,6 +12,8 @@ final class AuthenticatedWebViewController: BaseViewController {
     private var setupTask: Task<Void, Never>?
     private var progressObservation: NSKeyValueObservation?
     private var coordinator: Coordinator?
+    /// Canonical URLs already loaded by a `/login` bypass, to stop OAuth loops.
+    fileprivate var bypassedLoginLoads: Set<String> = []
 
     private lazy var progressView: UIProgressView = {
         let progressView = UIProgressView(progressViewStyle: .bar)
@@ -88,7 +90,7 @@ final class AuthenticatedWebViewController: BaseViewController {
                     presenter.present(invalid, animated: true)
                     return
                 }
-                ExternalLinkOpener.open(url, from: presenter)
+                ExternalLinkOpener.openTypedURL(url, from: presenter)
             }
         })
         presenter.present(alert, animated: true)
@@ -261,6 +263,7 @@ final class AuthenticatedWebViewController: BaseViewController {
         guard let index = popupWebViews.firstIndex(of: webView) else { return }
         popupWebViews.remove(at: index)
         webView.uiDelegate = nil
+        webView.navigationDelegate = nil
         webView.removeFromSuperview()
         updateBackItem()
     }
@@ -271,6 +274,26 @@ final class AuthenticatedWebViewController: BaseViewController {
         }
         updateBackItem()
         syncCookies(for: webView.url ?? initialURL)
+    }
+
+    fileprivate func handleLoginIntercept(
+        _ url: URL,
+        in webView: WKWebView,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard WebCookieStore.shared.hasAuthTokenCookie(for: url),
+              let replacement = LinuxDoLoginIntercept.replacementURL(
+                for: url,
+                previouslyLoaded: bypassedLoginLoads
+              ),
+              LinuxDoLoginIntercept.canonicalKey(replacement) != LinuxDoLoginIntercept.canonicalKey(url)
+        else {
+            decisionHandler(.allow)
+            return
+        }
+        bypassedLoginLoads.insert(LinuxDoLoginIntercept.canonicalKey(replacement))
+        decisionHandler(.cancel)
+        webView.load(URLRequest(url: replacement))
     }
 
     private func syncCookies(for url: URL? = nil) {
@@ -369,6 +392,26 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
 
     func webView(
         _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url,
+              LinuxDoLoginIntercept.looksLikeLoginPath(url)
+        else {
+            decisionHandler(.allow)
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let owner = self?.owner else {
+                decisionHandler(.allow)
+                return
+            }
+            owner.handleLoginIntercept(url, in: webView, decisionHandler: decisionHandler)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
@@ -376,6 +419,7 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
         guard navigationAction.targetFrame == nil else { return nil }
         let popup = WKWebView(frame: .zero, configuration: configuration)
         popup.uiDelegate = self
+        popup.navigationDelegate = self
         DispatchQueue.main.async { [weak self] in
             self?.owner?.attachPopup(popup, over: webView)
         }
