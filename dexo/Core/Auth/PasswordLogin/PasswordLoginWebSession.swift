@@ -575,10 +575,12 @@ final class PasswordLoginWebSession {
 
     fileprivate func finishInPlaceChallengeIfCleared(force: Bool = false) async {
         guard challengeContinuation != nil else { return }
-        if force || await hasClearanceCookie() {
+        if force {
             takeChallengeContinuation()?.resume()
             return
         }
+        guard await hasClearanceCookie() else { return }
+        takeChallengeContinuation()?.resume()
     }
 
     private func syncWebSessionToNativeJar() async {

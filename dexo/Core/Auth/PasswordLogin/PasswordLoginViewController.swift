@@ -373,9 +373,12 @@ final class PasswordLoginViewController: BaseViewController {
 
         do {
             try await session.start(attachedTo: captchaVC, embedIn: captchaVC.webContainer)
-            if let challengeURL = config.challengeURL, !(await session.hasClearanceCookie()) {
-                setBusy(true, status: String(localized: "password_login.status.cloudflare"))
-                try await session.runInPlaceCloudflareChallenge(url: challengeURL)
+            if let challengeURL = config.challengeURL {
+                let hasClearance = await session.hasClearanceCookie()
+                if !hasClearance {
+                    setBusy(true, status: String(localized: "password_login.status.cloudflare"))
+                    try await session.runInPlaceCloudflareChallenge(url: challengeURL)
+                }
             }
             setBusy(true, status: String(localized: "password_login.status.captcha"))
             try await session.loadCaptchaPage()
