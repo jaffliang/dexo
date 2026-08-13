@@ -258,7 +258,14 @@ final class PasswordLoginWebSession {
         let pwJS = Self.jsString(password)
         let captchaJS = hCaptchaToken.map(Self.jsString) ?? "null"
         let totpJS = secondFactorToken.map(Self.jsString) ?? "null"
-        let script = "window.__dexoPasswordLogin(\(idJS), \(pwJS), \(captchaJS), \(totpJS));"
+        // Do not return the async function's Promise: iOS 15 evaluateJavaScript
+        // cannot convert it to ObjC (执行JavaScript返回结果的类型不受支持).
+        let script = PasswordLoginJavaScriptEvaluate.invocationScript(
+            identifierJS: idJS,
+            passwordJS: pwJS,
+            captchaJS: captchaJS,
+            totpJS: totpJS
+        )
         PasswordLoginCrashBreadcrumb.record(.loginJsStart)
         if resultContinuation != nil {
             throw PasswordLoginError.unexpected(status: 0, phase: "evaluate", body: "login already in flight")
@@ -268,6 +275,11 @@ final class PasswordLoginWebSession {
                 self.resultContinuation = cont
                 DexoExceptionCatcher.evaluateJavaScript(script, in: webView) { [weak self] _, error in
                     guard let error else { return }
+                    // Login result arrives only via dexoPasswordLogin. A Promise
+                    // conversion error is a false failure — keep waiting.
+                    if PasswordLoginJavaScriptEvaluate.isUnsupportedResultType(error) {
+                        return
+                    }
                     DispatchQueue.main.async { [weak self] in
                         let wrapped = PasswordLoginError.unexpected(
                             status: 0,
