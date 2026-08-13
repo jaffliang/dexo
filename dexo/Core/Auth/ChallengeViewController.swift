@@ -270,16 +270,24 @@ final class ChallengeViewController: BaseViewController {
         let vc = ChallengeViewController(targetURL: url, userAgent: WebCookieStore.shared.userAgent)
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .pageSheet
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.large()]
+            sheet.prefersGrabberVisible = true
+        }
         presenter.present(nav, animated: true)
     }
 
     /// Presents the challenge sheet and suspends until it is dismissed
     /// (Done, Cancel, or interactive swipe). Cookies are synced on the
     /// existing dismissal paths before this returns in the common case.
+    ///
+    /// Pass `prefersFullScreen` when the presenter is already a sheet (e.g.
+    /// password login) so the WebView is not cramped inside a nested card.
     @MainActor
     static func presentAndWait(
         from presenter: UIViewController,
-        challengeURL: URL = URL(string: "https://linux.do/challenge")!
+        challengeURL: URL = URL(string: "https://linux.do/challenge")!,
+        prefersFullScreen: Bool = false
     ) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             let vc = ChallengeViewController(
@@ -288,7 +296,17 @@ final class ChallengeViewController: BaseViewController {
             )
             vc.waitContinuation = cont
             let nav = UINavigationController(rootViewController: vc)
-            nav.modalPresentationStyle = .pageSheet
+            if prefersFullScreen {
+                nav.modalPresentationStyle = .overFullScreen
+                nav.modalPresentationCapturesStatusBarAppearance = true
+                nav.view.backgroundColor = ThemeManager.shared.backgroundColor
+            } else {
+                nav.modalPresentationStyle = .pageSheet
+                if let sheet = nav.sheetPresentationController {
+                    sheet.detents = [.large()]
+                    sheet.prefersGrabberVisible = true
+                }
+            }
             let delegate = ChallengePresentationDelegate { [weak vc] in
                 vc?.resumeWaitIfNeeded()
             }

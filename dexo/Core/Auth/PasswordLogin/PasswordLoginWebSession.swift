@@ -33,10 +33,16 @@ final class PasswordLoginWebSession: NSObject {
     func start(attachedTo presenter: UIViewController, embedIn container: UIView) async throws {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = .nonPersistent()
+        wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
         let controller = wkConfig.userContentController
         controller.add(self, name: "dexoPasswordLogin")
         controller.add(self, name: "dexoPasswordLoginReady")
         controller.add(self, name: "dexoPasswordLoginCaptcha")
+        controller.addUserScript(WKUserScript(
+            source: "document.documentElement.style.colorScheme = 'light dark';",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
 
         // Keep the non-persistent jar; still route through DoH when enabled.
         proxyLease = try? await WebViewDoHConfigurator.configurePreservingDataStore(wkConfig)
@@ -44,9 +50,14 @@ final class PasswordLoginWebSession: NSObject {
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.isOpaque = false
-        webView.backgroundColor = .clear
+        webView.backgroundColor = ThemeManager.shared.cardBackgroundColor
         webView.scrollView.isScrollEnabled = true
+        webView.scrollView.bounces = true
+        webView.scrollView.keyboardDismissMode = .interactive
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.isUserInteractionEnabled = true
         if let ua = WebCookieStore.shared.userAgent {
             webView.customUserAgent = ua
         }
@@ -180,17 +191,38 @@ final class PasswordLoginWebSession: NSObject {
         <html>
         <head>
           <meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
           <style>
-            html, body { margin: 0; padding: 16px; font-family: -apple-system, sans-serif; background: transparent; }
-            .wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-            .hint { color: #888; font-size: 14px; text-align: center; }
+            html, body {
+              margin: 0;
+              padding: 0;
+              min-height: 100%;
+              height: 100%;
+              font-family: -apple-system, sans-serif;
+              background: transparent;
+              color-scheme: light dark;
+            }
+            .wrap {
+              box-sizing: border-box;
+              min-height: 100%;
+              width: 100%;
+              padding: 16px 12px 24px;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              gap: 16px;
+            }
+            .hint { color: #888; font-size: 15px; text-align: center; line-height: 1.4; }
+            .h-captcha { width: 100%; display: flex; justify-content: center; }
+            @media (prefers-color-scheme: dark) {
+              .hint { color: #aaa; }
+            }
           </style>
         </head>
         <body>
           <div class="wrap">
             <div class="hint">\(hintHTML)</div>
-            <div class="h-captcha" data-sitekey="\(siteKey)" data-callback="onPass" data-error-callback="onErr" data-expired-callback="onExp"></div>
+            <div class="h-captcha" data-sitekey="\(siteKey)" data-size="normal" data-callback="onPass" data-error-callback="onErr" data-expired-callback="onExp"></div>
           </div>
           <script>
             function post(name, payload) {
@@ -307,7 +339,7 @@ extension PasswordLoginWebSession: WKScriptMessageHandler {
     }
 }
 
-extension PasswordLoginWebSession: WKNavigationDelegate {
+extension PasswordLoginWebSession: WKNavigationDelegate, WKUIDelegate {
     func webView(
         _ webView: WKWebView,
         didReceive challenge: URLAuthenticationChallenge,
@@ -318,5 +350,17 @@ extension PasswordLoginWebSession: WKNavigationDelegate {
             return
         }
         completionHandler(.performDefaultHandling, nil)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if navigationAction.targetFrame == nil {
+            webView.load(navigationAction.request)
+        }
+        return nil
     }
 }

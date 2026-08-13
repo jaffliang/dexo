@@ -471,6 +471,10 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
         }
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .pageSheet
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.large()]
+            sheet.prefersGrabberVisible = true
+        }
         present(nav, animated: true)
     }
 

@@ -79,6 +79,88 @@ enum KeychainHelper {
         SecItemDelete(query as CFDictionary)
     }
 
+    // MARK: - Password Login Credentials (GenericPassword)
+
+    private static let passwordLoginService = "com.eilgnaw.dexo.passwordLogin"
+
+    /// Persists identifier + password for a forum. Never log the payload.
+    static func savePasswordLoginCredentials(_ payload: Data, for baseURL: String) throws {
+        try saveGenericPassword(payload, service: passwordLoginService, account: baseURL)
+    }
+
+    static func getPasswordLoginCredentials(for baseURL: String) -> Data? {
+        getGenericPassword(service: passwordLoginService, account: baseURL)
+    }
+
+    static func deletePasswordLoginCredentials(for baseURL: String) {
+        deleteGenericPassword(service: passwordLoginService, account: baseURL)
+    }
+
+    private static func saveGenericPassword(_ data: Data, service: String, account: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.unhandledError(status: updateStatus)
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status == errSecSuccess {
+            return
+        }
+
+        if status == errSecDuplicateItem {
+            let retryStatus = SecItemUpdate(
+                query as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+            guard retryStatus == errSecSuccess else {
+                throw KeychainError.unhandledError(status: retryStatus)
+            }
+            return
+        }
+
+        throw KeychainError.unhandledError(status: status)
+    }
+
+    private static func getGenericPassword(service: String, account: String) -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    private static func deleteGenericPassword(service: String, account: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     // MARK: - RSA Key Pair
 
     private static func rsaTag(for baseURL: String) -> String {

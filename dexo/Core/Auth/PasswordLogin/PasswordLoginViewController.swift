@@ -1,7 +1,6 @@
 import UIKit
-import WebKit
 
-/// Polished password-login flow: credentials → Cloudflare (if needed) → visible hCaptcha → session.
+/// Polished password-login flow: credentials → Cloudflare (if needed) → fullscreen hCaptcha → session.
 final class PasswordLoginViewController: BaseViewController {
     override var backgroundStyle: BackgroundStyle { .grouped }
 
@@ -19,7 +18,7 @@ final class PasswordLoginViewController: BaseViewController {
 
     private var step: Step = .form
     private var webSession: PasswordLoginWebSession?
-    private var captchaWebHost: UIView?
+    private var captchaViewController: PasswordLoginCaptchaViewController?
     private var didRetryCF = false
     private var lastCaptchaToken: String?
 
@@ -53,6 +52,29 @@ final class PasswordLoginViewController: BaseViewController {
         secure: true
     )
 
+    private let rememberRow: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+
+    private let rememberLabel: UILabel = {
+        let label = UILabel()
+        label.text = String(localized: "password_login.remember")
+        label.font = FontManager.shared.font(size: 16)
+        label.textColor = UIColor.label
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    private let rememberSwitch: UISwitch = {
+        let toggle = UISwitch()
+        toggle.isOn = true
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        return toggle
+    }()
+
     private let primaryButton: UIButton = {
         var config = UIButton.Configuration.filled()
         config.title = String(localized: "password_login.continue")
@@ -85,17 +107,6 @@ final class PasswordLoginViewController: BaseViewController {
 
     private let spinner = UIActivityIndicatorView(style: .medium)
 
-    private let captchaContainer: UIView = {
-        let view = UIView()
-        view.backgroundColor = ThemeManager.shared.cardBackgroundColor
-        view.layer.cornerRadius = 16
-        view.layer.cornerCurve = .continuous
-        view.clipsToBounds = true
-        view.isHidden = true
-        view.translatesAutoresizingMaskIntoConstraints = false
-        return view
-    }()
-
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
         self.config = config
@@ -123,14 +134,17 @@ final class PasswordLoginViewController: BaseViewController {
         view.addSubview(scrollView)
         scrollView.addSubview(contentStack)
 
-        [titleLabel, subtitleLabel, identifierField, passwordField, primaryButton, spinner, statusLabel, errorLabel, captchaContainer].forEach {
+        configureRememberRow()
+
+        [titleLabel, subtitleLabel, identifierField, passwordField, rememberRow, primaryButton, spinner, statusLabel, errorLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             contentStack.addArrangedSubview($0)
         }
         contentStack.setCustomSpacing(8, after: titleLabel)
         contentStack.setCustomSpacing(20, after: subtitleLabel)
         contentStack.setCustomSpacing(12, after: identifierField)
-        contentStack.setCustomSpacing(20, after: passwordField)
+        contentStack.setCustomSpacing(12, after: passwordField)
+        contentStack.setCustomSpacing(20, after: rememberRow)
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
@@ -145,7 +159,7 @@ final class PasswordLoginViewController: BaseViewController {
 
             identifierField.heightAnchor.constraint(equalToConstant: 48),
             passwordField.heightAnchor.constraint(equalToConstant: 48),
-            captchaContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            rememberRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
         ])
 
         primaryButton.addTarget(self, action: #selector(primaryTapped), for: .touchUpInside)
@@ -155,6 +169,7 @@ final class PasswordLoginViewController: BaseViewController {
         spinner.hidesWhenStopped = true
 
         applyTheme()
+        restoreRememberedCredentials()
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -162,13 +177,34 @@ final class PasswordLoginViewController: BaseViewController {
         applyTheme()
     }
 
+    private func configureRememberRow() {
+        rememberRow.addSubview(rememberLabel)
+        rememberRow.addSubview(rememberSwitch)
+        rememberSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            rememberLabel.leadingAnchor.constraint(equalTo: rememberRow.leadingAnchor, constant: 14),
+            rememberLabel.topAnchor.constraint(equalTo: rememberRow.topAnchor, constant: 12),
+            rememberLabel.bottomAnchor.constraint(equalTo: rememberRow.bottomAnchor, constant: -12),
+            rememberSwitch.leadingAnchor.constraint(greaterThanOrEqualTo: rememberLabel.trailingAnchor, constant: 12),
+            rememberSwitch.trailingAnchor.constraint(equalTo: rememberRow.trailingAnchor, constant: -14),
+            rememberSwitch.centerYAnchor.constraint(equalTo: rememberRow.centerYAnchor),
+        ])
+    }
+
     private func applyTheme() {
+        let theme = ThemeManager.shared
         titleLabel.textColor = UIColor.label
         subtitleLabel.textColor = UIColor.secondaryLabel
         statusLabel.textColor = UIColor.secondaryLabel
-        captchaContainer.backgroundColor = ThemeManager.shared.cardBackgroundColor
+        rememberLabel.textColor = UIColor.label
+        rememberRow.backgroundColor = theme.cardBackgroundColor
+        rememberRow.layer.cornerRadius = 12
+        rememberRow.layer.cornerCurve = .continuous
+        rememberRow.layer.borderWidth = 1
+        rememberRow.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
+        rememberSwitch.onTintColor = theme.accentColor
         var config = primaryButton.configuration ?? .filled()
-        config.baseBackgroundColor = ThemeManager.shared.accentColor
+        config.baseBackgroundColor = theme.accentColor
         primaryButton.configuration = config
         styleField(identifierField)
         styleField(passwordField)
@@ -200,11 +236,34 @@ final class PasswordLoginViewController: BaseViewController {
         tf.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
     }
 
+    private var forumBaseURL: String {
+        forum.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    private func restoreRememberedCredentials() {
+        let remember = PasswordLoginCredentialStore.rememberEnabled(for: forumBaseURL)
+        rememberSwitch.isOn = remember
+        guard remember, let stored = PasswordLoginCredentialStore.load(for: forumBaseURL) else { return }
+        identifierField.text = stored.identifier
+        passwordField.text = stored.password
+    }
+
+    /// Saves or clears credentials as soon as Continue is tapped, even if login later fails.
+    private func persistRememberPreference(identifier: String, password: String) {
+        if rememberSwitch.isOn {
+            PasswordLoginCredentialStore.setRememberEnabled(true, for: forumBaseURL)
+            try? PasswordLoginCredentialStore.save(identifier: identifier, password: password, for: forumBaseURL)
+        } else {
+            PasswordLoginCredentialStore.setRememberEnabled(false, for: forumBaseURL)
+            PasswordLoginCredentialStore.delete(for: forumBaseURL)
+        }
+    }
+
     @objc private func closeTapped() {
         webSession?.tearDown()
         webSession = nil
         onFinished?(.failure(PasswordLoginError.canceled))
-        dismiss(animated: true)
+        dismissLoginFlow()
     }
 
     @objc private func primaryTapped() {
@@ -221,8 +280,10 @@ final class PasswordLoginViewController: BaseViewController {
         primaryButton.isEnabled = !busy && step == .form
         identifierField.isEnabled = !busy && step == .form
         passwordField.isEnabled = !busy && step == .form
+        rememberSwitch.isEnabled = !busy && step == .form
         statusLabel.text = status
         if busy { spinner.startAnimating() } else { spinner.stopAnimating() }
+        captchaViewController?.setStatus(status, busy: busy)
     }
 
     private func startFromForm() async {
@@ -232,6 +293,7 @@ final class PasswordLoginViewController: BaseViewController {
             errorLabel.text = String(localized: "password_login.error.empty")
             return
         }
+        persistRememberPreference(identifier: identifier, password: password)
         view.endEditing(true)
         step = .working
         setBusy(true, status: String(localized: "password_login.status.cloudflare"))
@@ -241,14 +303,16 @@ final class PasswordLoginViewController: BaseViewController {
             setBusy(true, status: String(localized: "password_login.status.captcha"))
             try await presentCaptchaAndLogin(identifier: identifier, password: password)
         } catch PasswordLoginError.canceled {
+            await dismissCaptchaIfNeeded()
             step = .form
             setBusy(false, status: nil)
+            webSession = nil
         } catch {
+            await dismissCaptchaIfNeeded()
             step = .form
             setBusy(false, status: nil)
             errorLabel.text = (error as? LocalizedError)?.errorDescription
                 ?? String(localized: "password_login.error.unknown")
-            captchaContainer.isHidden = true
             webSession?.tearDown()
             webSession = nil
         }
@@ -259,26 +323,42 @@ final class PasswordLoginViewController: BaseViewController {
         let session = PasswordLoginWebSession(forum: forum, config: config)
         webSession = session
 
-        // Visible captcha surface
-        captchaContainer.isHidden = false
-        captchaContainer.subviews.forEach { $0.removeFromSuperview() }
+        let captchaVC = PasswordLoginCaptchaViewController()
+        captchaVC.onClose = { [weak self] in
+            self?.webSession?.tearDown()
+        }
+        captchaViewController = captchaVC
         step = .captcha
 
-        // Attach session's webview into captcha container by starting with self as presenter,
-        // then reparent. Simpler: specialize session to accept a container.
-        try await session.start(attachedTo: self, embedIn: captchaContainer)
-        setBusy(true, status: String(localized: "password_login.status.captcha_wait"))
+        let nav = UINavigationController(rootViewController: captchaVC)
+        nav.modalPresentationStyle = .overFullScreen
+        nav.modalPresentationCapturesStatusBarAppearance = true
+        nav.isModalInPresentation = true
+        nav.view.backgroundColor = ThemeManager.shared.backgroundColor
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            present(nav, animated: true) { cont.resume() }
+        }
+        await captchaVC.waitUntilOnScreen()
+        captchaVC.view.layoutIfNeeded()
 
-        let token = try await session.waitForCaptchaToken()
-        lastCaptchaToken = token
-        setBusy(true, status: String(localized: "password_login.status.signing_in"))
-        try await completeLogin(
-            session: session,
-            identifier: identifier,
-            password: password,
-            captchaToken: token,
-            secondFactor: nil
-        )
+        do {
+            try await session.start(attachedTo: captchaVC, embedIn: captchaVC.webContainer)
+            setBusy(true, status: String(localized: "password_login.status.captcha_wait"))
+
+            let token = try await session.waitForCaptchaToken()
+            lastCaptchaToken = token
+            setBusy(true, status: String(localized: "password_login.status.signing_in"))
+            try await completeLogin(
+                session: session,
+                identifier: identifier,
+                password: password,
+                captchaToken: token,
+                secondFactor: nil
+            )
+        } catch {
+            await dismissCaptchaIfNeeded()
+            throw error
+        }
     }
 
     private func completeLogin(
@@ -299,10 +379,11 @@ final class PasswordLoginViewController: BaseViewController {
         case "csrf" where result.status == 403 && !didRetryCF:
             didRetryCF = true
             setBusy(true, status: String(localized: "password_login.status.cloudflare_retry"))
+            let presenter = presentedViewController ?? self
             try await CloudflareClearanceGate.ensureClearance(
                 for: forum,
                 config: config,
-                from: self,
+                from: presenter,
                 force: true
             )
             try await session.reprimeCookies()
@@ -340,7 +421,7 @@ final class PasswordLoginViewController: BaseViewController {
                 session.tearDown()
                 webSession = nil
                 onFinished?(.success(()))
-                dismiss(animated: true)
+                dismissLoginFlow()
                 return
             }
             if result.status == 401 || result.status == 422 {
@@ -361,7 +442,8 @@ final class PasswordLoginViewController: BaseViewController {
     }
 
     private func promptSecondFactor() async throws -> String {
-        try await withCheckedThrowingContinuation { cont in
+        let presenter = presentedViewController ?? self
+        return try await withCheckedThrowingContinuation { cont in
             let alert = UIAlertController(
                 title: String(localized: "password_login.second_factor.title"),
                 message: String(localized: "password_login.second_factor.message"),
@@ -383,7 +465,30 @@ final class PasswordLoginViewController: BaseViewController {
                     cont.resume(returning: code)
                 }
             })
-            present(alert, animated: true)
+            presenter.present(alert, animated: true)
+        }
+    }
+
+    private func dismissCaptchaIfNeeded() async {
+        defer { captchaViewController = nil }
+        guard let captcha = captchaViewController else { return }
+        let presented = captcha.navigationController ?? captcha
+        guard presented.presentingViewController != nil, !presented.isBeingDismissed else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            presented.dismiss(animated: true) {
+                cont.resume()
+            }
+        }
+    }
+
+    /// Dismisses captcha + the password-login sheet from the original presenter.
+    private func dismissLoginFlow() {
+        captchaViewController = nil
+        let presenter = navigationController?.presentingViewController ?? presentingViewController
+        if let presenter {
+            presenter.dismiss(animated: true)
+        } else {
+            dismiss(animated: true)
         }
     }
 }
