@@ -19,11 +19,25 @@ struct PasswordLoginConfig: Sendable {
         challengeURL: URL(string: "https://linux.do/challenge")
     )
 
-    private static let all: [PasswordLoginConfig] = [.linuxDo]
+    /// Sister Discourse of linux.do. Site key scraped from live
+    /// `https://idcflare.com/login` HTML (`data-sitekey` / `h-captcha`) on
+    /// 2026-08-13; not linux.do's `a776b4ac-8c4c-441e-986a-c6ee9ed8cf08`.
+    /// `/challenge` is 404 — CF interstitial is origin or `/login`.
+    static let idcflare = PasswordLoginConfig(
+        host: "idcflare.com",
+        hCaptchaSiteKey: "cdde8d16-7fd6-49d4-861c-f2503ae209e4",
+        hCaptchaCreateEndpoints: [
+            "/captcha/hcaptcha/create.json",
+            "/hcaptcha/create.json",
+        ],
+        challengeURL: URL(string: "https://idcflare.com/login")
+    )
+
+    private static let all: [PasswordLoginConfig] = [.linuxDo, .idcflare]
 
     static func config(for baseURL: String) -> PasswordLoginConfig? {
         guard let host = URL(string: baseURL)?.host?.lowercased() else { return nil }
-        return all.first { $0.host == host }
+        return all.first { host == $0.host || host.hasSuffix(".\($0.host)") }
     }
 
     static func supportsPasswordLogin(for baseURL: String) -> Bool {

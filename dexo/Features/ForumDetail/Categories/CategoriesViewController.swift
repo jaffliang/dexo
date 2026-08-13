@@ -122,7 +122,7 @@ final class CategoriesViewController: ObservableViewController {
         }
 
         loginButton.isHidden = true
-        let showChallenge = viewModel.requiresChallenge && api.isLinuxDo && !viewModel.isLoading
+        let showChallenge = viewModel.requiresChallenge && api.isLinuxDoFamily && !viewModel.isLoading
         if showChallenge {
             errorLabel.text = viewModel.errorMessage
             errorLabel.isHidden = false

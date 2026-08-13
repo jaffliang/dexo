@@ -35,6 +35,50 @@ final class PasswordLoginSessionResponseTests: XCTestCase {
         )
     }
 
+    func testReasonSecondFactorRequiresCode() {
+        let body = #"{"error":"Please enter your authentication code","reason":"second_factor"}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .needsSecondFactor
+        )
+    }
+
+    func testSuccessJSONWithTotpEnabledFalseIsNotSecondFactor() {
+        let body = #"{"user":{"id":42,"username":"jeff","totp_enabled":false,"backup_codes_enabled":false}}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .signedIn
+        )
+    }
+
+    func testSignedInUserWithTotpEnabledTrueIsNotSecondFactor() {
+        let body = #"{"user":{"id":1,"username":"jeff","totp_enabled":true}}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .signedIn
+        )
+    }
+
+    func testSecondFactorRequiredFlagRequiresCode() {
+        let body = #"{"error":"Two-factor authentication required","second_factor_required":true}"#
+        XCTAssertEqual(
+            PasswordLoginSessionResponse.interpret(status: 200, body: body),
+            .needsSecondFactor
+        )
+    }
+
+    func testRawBodyTotpSubstringWithoutJSONFieldsIsNotSecondFactor() {
+        let body = "<html>totp_enabled backup_code second_factor widget</html>"
+        switch PasswordLoginSessionResponse.interpret(status: 200, body: body) {
+        case .needsSecondFactor:
+            XCTFail("raw HTML must not trip the 2FA heuristic")
+        case .failed:
+            break
+        default:
+            XCTFail("HTML 200 should surface as failed, not signed-in or 2FA")
+        }
+    }
+
     func testHTTP200WithErrorAndUnknownReasonSurfacesBody() {
         let body = #"{"error":"Account suspended.","reason":"suspended"}"#
         switch PasswordLoginSessionResponse.interpret(status: 200, body: body) {
@@ -114,6 +158,38 @@ final class PasswordLoginJavaScriptProtocolTests: XCTestCase {
         )
         let js = PasswordLoginWebSession.loginJavaScript(config: .linuxDo)
         XCTAssertTrue(js.contains(encoded), "login JS must embed both create endpoints in order: \(encoded)")
+    }
+
+    func testIdcflarePasswordLoginConfigUsesOwnSiteKeyAndLoginInterstitial() throws {
+        let config = try XCTUnwrap(PasswordLoginConfig.config(for: "https://idcflare.com/"))
+        XCTAssertEqual(config.host, "idcflare.com")
+        XCTAssertEqual(config.hCaptchaSiteKey, "cdde8d16-7fd6-49d4-861c-f2503ae209e4")
+        XCTAssertNotEqual(config.hCaptchaSiteKey, PasswordLoginConfig.linuxDo.hCaptchaSiteKey)
+        XCTAssertEqual(
+            config.hCaptchaCreateEndpoints,
+            [
+                "/captcha/hcaptcha/create.json",
+                "/hcaptcha/create.json",
+            ]
+        )
+        XCTAssertEqual(config.challengeURL, URL(string: "https://idcflare.com/login"))
+        XCTAssertNotEqual(config.challengeURL, URL(string: "https://linux.do/challenge"))
+        XCTAssertNotEqual(config.challengeURL?.path, "/challenge")
+
+        let encoded = try XCTUnwrap(
+            String(data: JSONEncoder().encode(config.hCaptchaCreateEndpoints), encoding: .utf8)
+        )
+        let js = PasswordLoginWebSession.loginJavaScript(config: .idcflare)
+        XCTAssertTrue(js.contains(encoded), "idcflare login JS must embed both create endpoints: \(encoded)")
+        XCTAssertTrue(js.contains("/captcha/hcaptcha/create.json"))
+        XCTAssertTrue(js.contains("/hcaptcha/create.json"))
+    }
+
+    func testIdcflareAppearsInPasswordLoginConfigLookup() {
+        XCTAssertNotNil(PasswordLoginConfig.config(for: "https://idcflare.com"))
+        XCTAssertNotNil(PasswordLoginConfig.config(for: "https://www.idcflare.com"))
+        XCTAssertTrue(PasswordLoginConfig.supportsPasswordLogin(for: "https://idcflare.com/"))
+        XCTAssertNil(PasswordLoginConfig.config(for: "https://example.com"))
     }
 
     func testLoginJavaScriptUsesCredentialsIncludeWithoutManualCookieHeaders() {

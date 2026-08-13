@@ -106,10 +106,15 @@ final class AddForumViewController: ObservableViewController {
                 dismiss(animated: true)
 
             case .challengeRequired:
+                let base = (try? ForumURLPolicy.normalize(viewModel.urlString)) ?? viewModel.urlString
+                guard let challengeURL = ForumPolicy.cloudflareInterstitialURL(for: base) else {
+                    break
+                }
                 presentChallengePrompt(
                     title: String(localized: "add_forum.challenge.title"),
                     message: String(localized: "add_forum.challenge.message"),
-                    actionTitle: String(localized: "add_forum.challenge.action")
+                    actionTitle: String(localized: "add_forum.challenge.action"),
+                    challengeURL: challengeURL
                 )
 
             case .failed:

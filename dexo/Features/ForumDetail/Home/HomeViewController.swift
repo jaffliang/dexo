@@ -332,7 +332,7 @@ final class HomeViewController: ObservableViewController {
         }
         challengeButton.isHidden = !(
             viewModel.requiresChallenge
-                && api.isLinuxDo
+                && api.isLinuxDoFamily
                 && viewModel.topics.isEmpty
                 && !viewModel.isLoading
         )

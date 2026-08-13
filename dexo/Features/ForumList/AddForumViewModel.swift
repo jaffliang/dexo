@@ -51,7 +51,7 @@ final class AddForumViewModel {
             if let basicInfoLoader {
                 info = try await basicInfoLoader(normalized)
             } else {
-                info = try await api.fetchBasicInfo(includeStoredWebCookies: api.isLinuxDo)
+                info = try await api.fetchBasicInfo(includeStoredWebCookies: api.isLinuxDoFamily)
             }
 
             var forum = ForumInstance.new(
@@ -64,7 +64,7 @@ final class AddForumViewModel {
             isLoading = false
             return .added
         } catch {
-            if api.isLinuxDo,
+            if api.isLinuxDoFamily,
                let apiError = error as? DiscourseAPIError,
                apiError.isChallengeRequired
             {

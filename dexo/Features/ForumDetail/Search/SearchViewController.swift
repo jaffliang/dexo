@@ -416,7 +416,7 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
         }
         challengeButton.isHidden = !(
             viewModel.requiresChallenge
-                && api.isLinuxDo
+                && api.isLinuxDoFamily
                 && !viewModel.isSearching
         )
 

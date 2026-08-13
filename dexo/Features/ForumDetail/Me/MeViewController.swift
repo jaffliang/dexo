@@ -238,7 +238,8 @@ final class MeViewController: ObservableViewController {
     }
 
     private func presentChallenge() {
-        ChallengeViewController.present(from: self)
+        guard let challengeURL = ForumPolicy.cloudflareInterstitialURL(for: api.baseURL) else { return }
+        ChallengeViewController.present(from: self, challengeURL: challengeURL)
     }
 
     private func loginTapped() {
@@ -300,7 +301,7 @@ extension MeViewController: UITableViewDataSource {
     }
 
     private var showChallengeRow: Bool {
-        guard api.isLinuxDo else { return false }
+        guard api.isLinuxDoFamily else { return false }
         return KeychainHelper.getUserApiKey(for: api.baseURL) == AuthManager.webAuthSentinel
     }
 

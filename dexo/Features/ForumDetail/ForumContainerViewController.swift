@@ -418,7 +418,7 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
             guard let self else { return }
             self.presentWebLogin(then: action)
         })
-        // Option 3: Native password login (linux.do — Cloudflare + hCaptcha)
+        // Option 3: Native password login (linux.do / idcflare — Cloudflare + hCaptcha)
         if let passwordConfig = PasswordLoginConfig.config(for: forum.baseURL) {
             alert.addAction(UIAlertAction(title: String(localized: "login.method.password"), style: .default) { [weak self] _ in
                 guard let self else { return }
