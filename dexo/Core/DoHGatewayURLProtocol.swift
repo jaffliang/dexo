@@ -5,7 +5,7 @@ import Foundation
 /// WKWebView / SFSafariViewController do not consult `URLProtocol`.
 nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable {
     private static let relay = Relay()
-    private var task: URLSessionDataTask?
+    private var relayTask: URLSessionDataTask?
 
     static func register(on configuration: URLSessionConfiguration) {
         var classes = configuration.protocolClasses ?? []
@@ -41,12 +41,12 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
             print("[DoHGateway] \(request.httpMethod ?? "GET") \(original) -> \(proxied)")
         }
         #endif
-        task = Self.relay.start(rewritten, owner: self)
+        relayTask = Self.relay.start(rewritten, owner: self)
     }
 
     override func stopLoading() {
-        task?.cancel()
-        task = nil
+        relayTask?.cancel()
+        relayTask = nil
         Self.relay.cancel(self)
     }
 }
