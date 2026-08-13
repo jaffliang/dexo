@@ -13,6 +13,8 @@ final class PasswordLoginJavaScriptEvaluateTests: XCTestCase {
         )
         XCTAssertTrue(script.hasPrefix("void window.__dexoPasswordLogin("))
         XCTAssertTrue(script.hasSuffix("true;"))
+        XCTAssertFalse(script.contains("async"))
+        XCTAssertFalse(script.contains("await fetch"))
         XCTAssertEqual(PasswordLoginWebSession.jsString("user"), encoded)
     }
 
