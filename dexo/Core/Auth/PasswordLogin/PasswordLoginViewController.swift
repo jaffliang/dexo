@@ -419,7 +419,10 @@ final class PasswordLoginViewController: BaseViewController {
         )
 
         switch result.phase {
-        case "csrf" where result.status == 403 && !didRetryCF:
+        case "csrf" where PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(
+            phase: result.phase,
+            status: result.status
+        ) && !didRetryCF:
             didRetryCF = true
             setBusy(true, status: String(localized: "password_login.status.cloudflare_retry"))
             guard let challengeURL = config.challengeURL else {

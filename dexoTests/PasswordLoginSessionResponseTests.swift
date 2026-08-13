@@ -2,6 +2,15 @@ import XCTest
 @testable import dexo
 
 final class PasswordLoginSessionResponseTests: XCTestCase {
+    func testOnlyCsrf403RetriesCloudflareChallenge() {
+        XCTAssertTrue(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "csrf", status: 403))
+        XCTAssertFalse(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "csrf", status: 200))
+        XCTAssertFalse(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "evaluate", status: 0))
+        XCTAssertFalse(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "evaluate", status: 403))
+        XCTAssertFalse(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "session", status: 403))
+        XCTAssertFalse(PasswordLoginSessionResponse.shouldRetryCloudflareChallenge(phase: "exception", status: 0))
+    }
+
     func testHTTP200WithUserIsSignedIn() {
         let body = #"{"user":{"id":42,"username":"jeff"}}"#
         XCTAssertEqual(

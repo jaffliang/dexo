@@ -15,6 +15,13 @@ enum PasswordLoginSessionResponse {
         var hasUser: Bool
     }
 
+    /// In-place `/challenge` retry is only for Discourse CSRF 403.
+    /// `phase=evaluate` / `执行JavaScript返回结果的类型不受支持` is an iOS 15
+    /// Promise-bridge false failure, not Cloudflare.
+    static func shouldRetryCloudflareChallenge(phase: String, status: Int) -> Bool {
+        phase == "csrf" && status == 403
+    }
+
     static func interpret(status: Int, body: String) -> PasswordLoginSessionOutcome {
         let parsed = parseBody(body)
         let reason = parsed.reason?.lowercased() ?? ""

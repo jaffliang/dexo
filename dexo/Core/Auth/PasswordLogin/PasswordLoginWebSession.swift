@@ -359,16 +359,16 @@ final class PasswordLoginWebSession {
         let pwJS = Self.jsString(password)
         let captchaJS = hCaptchaToken.map(Self.jsString) ?? "null"
         let totpJS = secondFactorToken.map(Self.jsString) ?? "null"
-        // Re-define `__dexoPasswordLogin` after in-place `/challenge`, then
-        // fire-and-forget with `void` so iOS 15 does not try to bridge a Promise.
-        let script = Self.loginJavaScript(config: config)
-            + "\n"
-            + PasswordLoginJavaScriptEvaluate.invocationScript(
-                identifierJS: idJS,
-                passwordJS: pwJS,
-                captchaJS: captchaJS,
-                totpJS: totpJS
-            )
+        // Fire-and-forget only. Do not evaluate the async function source here:
+        // iOS 15 cannot bridge a Promise (`执行JavaScript返回结果的类型不受支持`).
+        // That WKError is not CSRF — `__dexoPasswordLogin` is a WKUserScript and
+        // reports via dexoPasswordLogin. A separate evaluate fix voids the Promise.
+        let script = PasswordLoginJavaScriptEvaluate.invocationScript(
+            identifierJS: idJS,
+            passwordJS: pwJS,
+            captchaJS: captchaJS,
+            totpJS: totpJS
+        )
         PasswordLoginCrashBreadcrumb.record(.loginJsStart)
         if resultContinuation != nil {
             throw PasswordLoginError.unexpected(status: 0, phase: "evaluate", body: "login already in flight")
@@ -378,8 +378,8 @@ final class PasswordLoginWebSession {
                 self.resultContinuation = cont
                 DexoExceptionCatcher.evaluateJavaScript(script, in: webView) { [weak self] _, error in
                     guard let error else { return }
-                    // Login result arrives only via dexoPasswordLogin. A Promise
-                    // conversion error is a false failure — keep waiting.
+                    // Promise-bridge false failure on iOS 15. Not Cloudflare/CSRF;
+                    // keep waiting for dexoPasswordLogin.
                     if PasswordLoginJavaScriptEvaluate.isUnsupportedResultType(error) {
                         return
                     }
