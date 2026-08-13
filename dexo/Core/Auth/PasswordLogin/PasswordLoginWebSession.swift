@@ -503,13 +503,12 @@ final class PasswordLoginWebSession {
         }
     }
 
-    private static func jsString(_ value: String) -> String {
-        let data = try? JSONSerialization.data(withJSONObject: value, options: [])
-        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+    nonisolated static func jsString(_ value: String) -> String {
+        JavaScriptJSONString.encode(value)
     }
 
     private static func makeHTML(config: PasswordLoginConfig, captchaHint: String) -> String {
-        let endpointsJSON = (try? String(data: JSONSerialization.data(withJSONObject: config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"
+        let endpointsJSON = (try? String(data: JSONEncoder().encode(config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"
         let siteKey = config.hCaptchaSiteKey
         let hintHTML = captchaHint
             .replacingOccurrences(of: "&", with: "&amp;")

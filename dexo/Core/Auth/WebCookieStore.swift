@@ -201,9 +201,10 @@ final class WebCookieStore {
             }
             return dict
         }
-        if let data = try? JSONSerialization.data(withJSONObject: serializable) {
-            try? data.write(to: filePath, options: .atomic)
-        }
+        guard JSONSerialization.isValidJSONObject(serializable),
+              let data = try? JSONSerialization.data(withJSONObject: serializable)
+        else { return }
+        try? data.write(to: filePath, options: .atomic)
     }
 
     private func load() {
