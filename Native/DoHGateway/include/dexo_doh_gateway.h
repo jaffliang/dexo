@@ -26,6 +26,10 @@ int32_t dexo_doh_gateway_port(void);
 /// 1 when the accept loop is running, otherwise 0.
 int32_t dexo_doh_gateway_is_running(void);
 
+/// NUL-terminated last start failure, or an empty string. Valid until the
+/// next `dexo_doh_gateway_start` call.
+const char *dexo_doh_gateway_last_error(void);
+
 #ifdef __cplusplus
 }
 #endif

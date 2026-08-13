@@ -30,4 +30,11 @@ final class DoHGatewayRuntimeTests: XCTestCase {
             XCTAssertNotNil(EncryptedDNSManager.normalizedServerURL(server.urlString))
         }
     }
+
+    func testInvalidDoHURLRecordsStartError() {
+        XCTAssertFalse(DoHGatewayRuntime.shared.setEnabled(true, serverURLString: "http://dns.example.com/dns-query"))
+        let reason = DoHGatewayRuntime.shared.lastError ?? ""
+        XCTAssertFalse(reason.isEmpty)
+        XCTAssertTrue(reason.localizedCaseInsensitiveContains("https"), reason)
+    }
 }

@@ -2,6 +2,7 @@ mod dns;
 mod doh;
 mod ffi;
 mod gateway;
+mod http;
 mod tls;
 
 pub use ffi::{

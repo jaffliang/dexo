@@ -1,19 +1,24 @@
-//! DNS-over-HTTPS client that dials bootstrap IPs so the DoH hostname is not
-//! resolved through system DNS (chicken-and-egg).
+//! DNS-over-HTTPS client. Well-known hosts dial hardcoded bootstrap IPs.
+//! Custom DoH hostnames are resolved once at gateway start via system DNS.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::dns::{self, Lookup, TYPE_A, TYPE_AAAA, TYPE_HTTPS};
+use crate::http;
 use crate::tls::GatewayTls;
 
 const DOH_TIMEOUT: Duration = Duration::from_secs(8);
+const HTTPS_RR_BOUND: Duration = Duration::from_secs(2);
+const AAAA_WHEN_A_OK: Duration = Duration::from_secs(1);
+const SYSTEM_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_NAME: &str = "linux.do";
 
 #[derive(Clone)]
 pub struct DohResolver {
@@ -30,29 +35,75 @@ struct DohEndpoint {
 }
 
 impl DohResolver {
-    pub fn new(doh_url: &str, tls: Arc<GatewayTls>) -> Result<Self, &'static str> {
-        Ok(Self {
-            endpoint: parse_doh_url(doh_url)?,
-            tls,
-        })
+    pub async fn new(doh_url: &str, tls: Arc<GatewayTls>) -> Result<Self, String> {
+        let mut endpoint = parse_doh_url(doh_url).map_err(str::to_string)?;
+        if endpoint.bootstrap.is_empty() {
+            tracing_log(&format!(
+                "no hardcoded bootstrap for {}; resolving once via system DNS",
+                endpoint.host
+            ));
+            endpoint.bootstrap = system_lookup(&endpoint.host, endpoint.port).await?;
+        }
+        Ok(Self { endpoint, tls })
     }
 
     pub fn host(&self) -> &str {
         &self.endpoint.host
     }
 
+    pub async fn probe(&self) -> Result<(), String> {
+        self.lookup(PROBE_NAME)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("DoH probe failed: {error}"))
+    }
+
     pub async fn lookup(&self, name: &str) -> Result<Lookup, String> {
         let mut combined = Lookup::default();
-        for record_type in [TYPE_HTTPS, TYPE_A, TYPE_AAAA] {
-            match self.query(name, record_type).await {
+
+        let https_fut = tokio::time::timeout(HTTPS_RR_BOUND, self.query(name, TYPE_HTTPS));
+        let a_fut = self.query(name, TYPE_A);
+        let (https_part, a_part) = tokio::join!(https_fut, a_fut);
+
+        match https_part {
+            Ok(Ok(part)) => {
+                combined.https.extend(part.https);
+                combined.ipv4.extend(part.ipv4);
+                combined.ipv6.extend(part.ipv6);
+            }
+            Ok(Err(error)) => tracing_log(&format!("HTTPS RR lookup skipped: {error}")),
+            Err(_) => tracing_log("HTTPS RR lookup timed out"),
+        }
+
+        let a_ok = match a_part {
+            Ok(part) => {
+                combined.ipv4.extend(part.ipv4);
+                combined.ipv6.extend(part.ipv6);
+                combined.https.extend(part.https);
+                true
+            }
+            Err(error) => {
+                if combined.ipv4.is_empty() && combined.ipv6.is_empty() {
+                    tracing_log(&format!("A lookup failed: {error}"));
+                }
+                false
+            }
+        };
+
+        if a_ok {
+            match tokio::time::timeout(AAAA_WHEN_A_OK, self.query(name, TYPE_AAAA)).await {
+                Ok(Ok(part)) => {
+                    combined.ipv4.extend(part.ipv4);
+                    combined.ipv6.extend(part.ipv6);
+                }
+                Ok(Err(error)) => tracing_log(&format!("AAAA lookup skipped: {error}")),
+                Err(_) => tracing_log("AAAA lookup timed out after A succeeded"),
+            }
+        } else {
+            match self.query(name, TYPE_AAAA).await {
                 Ok(part) => {
                     combined.ipv4.extend(part.ipv4);
                     combined.ipv6.extend(part.ipv6);
-                    combined.https.extend(part.https);
-                }
-                Err(error) if record_type == TYPE_HTTPS => {
-                    // HTTPS/SVCB is optional; A/AAAA still let us connect-by-IP.
-                    tracing_log(&format!("HTTPS RR lookup skipped: {error}"));
                 }
                 Err(error) => {
                     if combined.ipv4.is_empty() && combined.ipv6.is_empty() {
@@ -61,6 +112,7 @@ impl DohResolver {
                 }
             }
         }
+
         combined.ipv4.sort();
         combined.ipv4.dedup();
         combined.ipv6.sort();
@@ -90,6 +142,19 @@ impl DohResolver {
     }
 
     async fn exchange_one(&self, ip: IpAddr, wire: &[u8]) -> Result<Vec<u8>, String> {
+        match self.exchange_method(ip, wire, true).await {
+            Ok(body) => Ok(body),
+            Err(post_error) => {
+                tracing_log(&format!("DoH POST failed ({post_error}); trying RFC 8484 GET"));
+                match self.exchange_method(ip, wire, false).await {
+                    Ok(body) => Ok(body),
+                    Err(get_error) => Err(format!("{post_error}; GET {get_error}")),
+                }
+            }
+        }
+    }
+
+    async fn exchange_method(&self, ip: IpAddr, wire: &[u8], post: bool) -> Result<Vec<u8>, String> {
         let addr = SocketAddr::new(ip, self.endpoint.port);
         let tcp = tokio::time::timeout(DOH_TIMEOUT, TcpStream::connect(addr))
             .await
@@ -108,25 +173,38 @@ impl DohResolver {
         } else {
             self.endpoint.path.clone()
         };
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
-            host = self.endpoint.host,
-            len = wire.len(),
-        );
+        let request = if post {
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+                host = self.endpoint.host,
+                len = wire.len(),
+            )
+        } else {
+            let dns = base64url_nopad(wire);
+            let separator = if path.contains('?') { '&' } else { '?' };
+            format!(
+                "GET {path}{separator}dns={dns} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n",
+                host = self.endpoint.host,
+            )
+        };
         tls.write_all(request.as_bytes())
             .await
             .map_err(|error| format!("DoH write headers: {error}"))?;
-        tls.write_all(wire)
-            .await
-            .map_err(|error| format!("DoH write body: {error}"))?;
+        if post {
+            tls.write_all(wire)
+                .await
+                .map_err(|error| format!("DoH write body: {error}"))?;
+        }
         tls.flush().await.map_err(|error| format!("DoH flush: {error}"))?;
 
-        let mut response = Vec::new();
-        tokio::time::timeout(DOH_TIMEOUT, tls.read_to_end(&mut response))
+        let response = tokio::time::timeout(DOH_TIMEOUT, http::read_http_response(&mut tls))
             .await
-            .map_err(|_| "DoH read timeout".to_string())?
-            .map_err(|error| format!("DoH read: {error}"))?;
-        split_http_body(&response)
+            .map_err(|_| "DoH read timeout".to_string())??;
+        let (status, body) = http::status_and_decoded_body(&response)?;
+        if status != 200 {
+            return Err(format!("DoH HTTP {status}"));
+        }
+        Ok(body)
     }
 }
 
@@ -140,6 +218,22 @@ fn dns_id(name: &str, record_type: u16) -> u16 {
         hash = hash.wrapping_mul(33).wrapping_add(byte as u16);
     }
     hash.wrapping_add(record_type)
+}
+
+async fn system_lookup(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+    let target = format!("{host}:{port}");
+    let iter = tokio::time::timeout(SYSTEM_LOOKUP_TIMEOUT, tokio::net::lookup_host(target))
+        .await
+        .map_err(|_| format!("system DNS timeout for {host}"))?
+        .map_err(|error| format!("system DNS lookup {host}: {error}"))?;
+    let mut ips: Vec<IpAddr> = iter.map(|addr| addr.ip()).collect();
+    ips.sort();
+    ips.dedup();
+    ips.retain(|ip| !ip.is_loopback() && !ip.is_unspecified());
+    if ips.is_empty() {
+        return Err(format!("system DNS returned no addresses for {host}"));
+    }
+    Ok(ips)
 }
 
 fn parse_doh_url(input: &str) -> Result<DohEndpoint, &'static str> {
@@ -171,9 +265,6 @@ fn parse_doh_url(input: &str) -> Result<DohEndpoint, &'static str> {
     };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let bootstrap = bootstrap_ips(&host);
-    if bootstrap.is_empty() {
-        return Err("DoH host has no bootstrap IPs");
-    }
     Ok(DohEndpoint {
         host,
         port,
@@ -182,8 +273,8 @@ fn parse_doh_url(input: &str) -> Result<DohEndpoint, &'static str> {
     })
 }
 
-/// Well-known public DoH hosts. Custom endpoints must use one of these names
-/// or a literal IP so the resolver itself is not a chicken-and-egg lookup.
+/// Well-known public DoH hosts. Unknown hostnames keep an empty list and are
+/// bootstrapped once via system DNS when the gateway starts.
 pub fn bootstrap_ips(host: &str) -> Vec<IpAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return vec![ip];
@@ -204,18 +295,27 @@ pub fn bootstrap_ips(host: &str) -> Vec<IpAddr> {
     addresses.iter().filter_map(|value| value.parse().ok()).collect()
 }
 
-fn split_http_body(response: &[u8]) -> Result<Vec<u8>, String> {
-    const DELIM: &[u8] = b"\r\n\r\n";
-    let index = response
-        .windows(DELIM.len())
-        .position(|window| window == DELIM)
-        .ok_or_else(|| "DoH HTTP response missing header delimiter".to_string())?;
-    let header = std::str::from_utf8(&response[..index]).map_err(|_| "DoH HTTP headers not utf8")?;
-    let status_line = header.lines().next().unwrap_or("");
-    if !status_line.contains(" 200 ") && !status_line.ends_with(" 200") {
-        return Err(format!("DoH HTTP {status_line}"));
+fn base64url_nopad(input: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut index = 0;
+    while index < input.len() {
+        let remaining = input.len() - index;
+        let b0 = input[index];
+        let b1 = if remaining > 1 { input[index + 1] } else { 0 };
+        let b2 = if remaining > 2 { input[index + 2] } else { 0 };
+        let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(TABLE[((triple >> 18) & 63) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 63) as usize] as char);
+        if remaining > 1 {
+            out.push(TABLE[((triple >> 6) & 63) as usize] as char);
+        }
+        if remaining > 2 {
+            out.push(TABLE[(triple & 63) as usize] as char);
+        }
+        index += 3;
     }
-    Ok(response[index + DELIM.len()..].to_vec())
+    out
 }
 
 #[cfg(test)]
@@ -233,11 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_aliyun_and_rejects_unknown_hosts() {
-        let endpoint = parse_doh_url("https://dns.alidns.com/dns-query").unwrap();
-        assert_eq!(endpoint.bootstrap[0], IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)));
-        assert!(parse_doh_url("https://unknown-doh.example/dns-query").is_err());
+    fn parses_unknown_hosts_without_bootstrap_mapping() {
+        let endpoint = parse_doh_url("https://unknown-doh.example/dns-query").unwrap();
+        assert_eq!(endpoint.host, "unknown-doh.example");
+        assert_eq!(endpoint.path, "/dns-query");
+        assert!(endpoint.bootstrap.is_empty());
+        let custom = parse_doh_url("https://jeff-dean.ddd.oaifree.com/query-dns").unwrap();
+        assert_eq!(custom.host, "jeff-dean.ddd.oaifree.com");
+        assert_eq!(custom.path, "/query-dns");
+        assert!(custom.bootstrap.is_empty());
         assert!(parse_doh_url("http://cloudflare-dns.com/dns-query").is_err());
+        let alidns = parse_doh_url("https://dns.alidns.com/dns-query").unwrap();
+        assert_eq!(alidns.bootstrap[0], IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)));
     }
 
     #[test]
@@ -247,8 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn splits_dns_message_body() {
-        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\n\r\nWIRE";
-        assert_eq!(split_http_body(response).unwrap(), b"WIRE");
+    fn base64url_matches_rfc4648_vectors() {
+        assert_eq!(base64url_nopad(b""), "");
+        assert_eq!(base64url_nopad(b"f"), "Zg");
+        assert_eq!(base64url_nopad(b"fo"), "Zm8");
+        assert_eq!(base64url_nopad(b"foo"), "Zm9v");
     }
 }

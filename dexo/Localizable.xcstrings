@@ -5837,6 +5837,54 @@
         }
       }
     },
+    "settings.doh.enable_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The DoH gateway could not start: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DoH 网关未能启动：%@"
+          }
+        }
+      }
+    },
+    "settings.doh.enable_failed.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn’t enable DNS over HTTPS"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法开启 DNS over HTTPS"
+          }
+        }
+      }
+    },
+    "settings.doh.enable_failed.unknown" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The DoH gateway failed to start."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DoH 网关启动失败。"
+          }
+        }
+      }
+    },
     "settings.doh.enabled" : {
       "localizations" : {
         "en" : {

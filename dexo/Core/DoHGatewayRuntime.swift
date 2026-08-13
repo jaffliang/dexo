@@ -11,6 +11,7 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         gatewayPort: 0,
         dohHost: nil
     )
+    private var lastErrorStorage: String?
 
     private init() {}
 
@@ -18,6 +19,12 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return configuration
+    }
+
+    var lastError: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastErrorStorage
     }
 
     /// Inserts the gateway `URLProtocol` into every URLSession the app creates
@@ -29,8 +36,12 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         stopListener()
+        lock.lock()
+        lastErrorStorage = nil
+        lock.unlock()
         guard enabled else { return true }
         guard let serverURL = DoHGatewayPolicy.normalizedDoHURL(serverURLString) else {
+            recordError("DoH URL must be HTTPS")
             return false
         }
 
@@ -38,7 +49,9 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
             dexo_doh_gateway_start(cString, 0)
         }
         guard port > 0 else {
-            print("[DoHGateway] failed to start listener (code \(port))")
+            let reason = Self.gatewayLastErrorText()
+            recordError(reason)
+            print("[DoHGateway] failed to start listener (code \(port)): \(reason)")
             return false
         }
 
@@ -55,6 +68,19 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
 
     func stop() {
         stopListener()
+    }
+
+    private func recordError(_ message: String) {
+        lock.lock()
+        lastErrorStorage = message
+        lock.unlock()
+    }
+
+    private static func gatewayLastErrorText() -> String {
+        let pointer = dexo_doh_gateway_last_error()
+        let text = String(cString: pointer)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "DoH gateway failed to start" : trimmed
     }
 
     private func stopListener() {

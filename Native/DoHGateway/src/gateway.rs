@@ -10,10 +10,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::doh::DohResolver;
+use crate::http::{self, MAX_BODY_BYTES, MAX_HEADER_BYTES};
 use crate::tls::GatewayTls;
 
-const MAX_HEADER_BYTES: usize = 64 * 1024;
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 const HOST_HEADER: &str = "x-dexo-gateway-host";
@@ -164,11 +163,9 @@ where
         .await
         .map_err(|error| format!("upstream flush: {error}"))?;
 
-    let mut response = Vec::new();
-    tokio::time::timeout(UPSTREAM_TIMEOUT, tls.read_to_end(&mut response))
+    let response = tokio::time::timeout(UPSTREAM_TIMEOUT, http::read_http_response(&mut tls))
         .await
-        .map_err(|_| "upstream read timeout".to_string())?
-        .map_err(|error| format!("upstream read: {error}"))?;
+        .map_err(|_| "upstream read timeout".to_string())??;
     if response.is_empty() {
         return Err("empty upstream response".into());
     }

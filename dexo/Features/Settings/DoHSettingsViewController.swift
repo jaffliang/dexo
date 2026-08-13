@@ -66,10 +66,16 @@ final class DoHSettingsViewController: ObservableViewController {
             _ = EncryptedDNSManager.shared.setEnabled(false, serverURLString: "")
             return
         }
-        _ = EncryptedDNSManager.shared.setEnabled(
-            settings.dohEnabled,
+        let wantedEnabled = settings.dohEnabled
+        let started = EncryptedDNSManager.shared.setEnabled(
+            wantedEnabled,
             serverURLString: server.urlString
         )
+        if wantedEnabled && !started {
+            settings.dohEnabled = false
+            showEnableFailedAlert()
+            tableView.reloadData()
+        }
     }
 
     private func setDefaultServer(_ server: AppSettings.DoHServer) {
@@ -141,6 +147,18 @@ final class DoHSettingsViewController: ObservableViewController {
         present(alert, animated: true)
     }
 
+    private func showEnableFailedAlert() {
+        let reason = DoHGatewayRuntime.shared.lastError
+            ?? String(localized: "settings.doh.enable_failed.unknown")
+        let alert = UIAlertController(
+            title: String(localized: "settings.doh.enable_failed.title"),
+            message: String(localized: "settings.doh.enable_failed.message \(reason)"),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
+        present(alert, animated: true)
+    }
+
     @objc private func dohSwitchChanged(_ sender: UISwitch) {
         guard !sender.isOn || settings.defaultDoHServer != nil else {
             sender.setOn(false, animated: true)
@@ -154,6 +172,7 @@ final class DoHSettingsViewController: ObservableViewController {
         ) else {
             sender.setOn(false, animated: true)
             settings.dohEnabled = false
+            showEnableFailedAlert()
             return
         }
         settings.dohEnabled = sender.isOn

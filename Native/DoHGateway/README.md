@@ -7,8 +7,9 @@ forum API traffic. WKWebView is not attached to this proxy.
 
 1. Binds `127.0.0.1` (ephemeral port by default).
 2. Reads plaintext HTTP/1.1 from the app (`X-Dexo-Gateway-Host` etc.).
-3. Resolves the origin over DNS-over-HTTPS, dialing the DoH server by
-   **bootstrap IP** so the resolver hostname is not a chicken-and-egg lookup.
+3. Resolves the origin over DNS-over-HTTPS. Known DoH hosts dial a hardcoded
+   **bootstrap IP**. Custom DoH hostnames are resolved **once at start** via
+   system DNS (getaddrinfo), then all forum lookups go over DoH.
 4. Opens outbound TLS 1.3 to that IP:
    - **ECH** when the origin’s HTTPS/SVCB record includes an `ech` config and
      this crate is built with `--features ech` (default).

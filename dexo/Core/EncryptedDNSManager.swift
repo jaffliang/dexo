@@ -45,17 +45,15 @@ final class EncryptedDNSManager {
             return true
         }
 
-        guard let serverURL = Self.normalizedServerURL(serverURLString) else {
-            return false
-        }
-
         if #available(iOS 17.0, *) {
             // Existing proxy sessions may keep resolved addresses and open
             // connections, so changing the resolver must rebuild them.
             WebViewDoHProxy.shared.stop()
         }
 
-        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURL.absoluteString) else {
+        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURLString),
+              let serverURL = Self.normalizedServerURL(serverURLString)
+        else {
             privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
             privacyContext.flushCache()
             return false
