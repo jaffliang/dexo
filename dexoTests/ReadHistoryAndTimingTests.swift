@@ -265,8 +265,30 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
         XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://meta.linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://example.com"))
+        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
         settings.linuxDoReadTimingsEnabled = true
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+    }
+
+    func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://www.idcflare.com"))
+        XCTAssertFalse(ForumPolicy.isLinuxDoFamily(baseURL: "https://example.com"))
+
+        XCTAssertEqual(
+            ForumPolicy.cloudflareInterstitialURL(for: "https://linux.do"),
+            URL(string: "https://linux.do/challenge")
+        )
+        XCTAssertEqual(
+            ForumPolicy.cloudflareInterstitialURL(for: "https://idcflare.com"),
+            URL(string: "https://idcflare.com/login")
+        )
+        XCTAssertNil(ForumPolicy.cloudflareInterstitialURL(for: "https://example.com"))
+
+        XCTAssertTrue(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://linux.do"))
+        XCTAssertFalse(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://idcflare.com"))
     }
 
     func testCloudflareChallengeWinsOverSuccessStatus() {

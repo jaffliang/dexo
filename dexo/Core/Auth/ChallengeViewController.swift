@@ -2,12 +2,13 @@ import UIKit
 import WebKit
 
 extension UIViewController {
-    /// Presents the shared Cloudflare challenge prompt and opens the existing
-    /// linux.do challenge page when the user chooses to continue.
+    /// Presents the shared Cloudflare challenge prompt and opens this forum's
+    /// interstitial page when the user chooses to continue.
     func presentChallengePrompt(
         title: String = String(localized: "challenge.prompt.title"),
         message: String = String(localized: "challenge.prompt.message"),
-        actionTitle: String = String(localized: "me.challenge")
+        actionTitle: String = String(localized: "me.challenge"),
+        challengeURL: URL
     ) {
         let alert = UIAlertController(
             title: title,
@@ -17,7 +18,7 @@ extension UIViewController {
         alert.addAction(UIAlertAction(title: String(localized: "action.cancel"), style: .cancel))
         alert.addAction(UIAlertAction(title: actionTitle, style: .default) { [weak self] _ in
             guard let self else { return }
-            ChallengeViewController.present(from: self)
+            ChallengeViewController.present(from: self, challengeURL: challengeURL)
         })
         present(alert, animated: true)
     }
@@ -26,25 +27,26 @@ extension UIViewController {
     /// challenge, prompts the user to pass it. Returns true if the prompt was
     /// shown, so callers can suppress generic error alerts on that path.
     ///
-    /// The challenge flow targets `linux.do/challenge`, so the prompt is
-    /// suppressed for any other forum even if its response trips the CF
-    /// detector — sending the user to linux.do wouldn't refresh their cookies
-    /// for the forum they were actually browsing.
+    /// Each linux.do-family host has its own interstitial URL. Never send an
+    /// idcflare user to `linux.do/challenge` — that wouldn't refresh their
+    /// cookies, and idcflare's `/challenge` is 404.
     @discardableResult
     func presentChallengePromptIfNeeded(error: Error, on api: DiscourseAPI) -> Bool {
-        guard api.isLinuxDo else { return false }
+        guard api.isLinuxDoFamily,
+              let challengeURL = ForumPolicy.cloudflareInterstitialURL(for: api.baseURL)
+        else { return false }
         guard (error as? DiscourseAPIError)?.isChallengeRequired == true else {
             return false
         }
-        presentChallengePrompt()
+        presentChallengePrompt(challengeURL: challengeURL)
         return true
     }
 }
 
-/// Presents linux.do's `/challenge` page in a WKWebView seeded with the user's
-/// existing web-login cookies. Cookie changes are synced immediately, with a
-/// final sync on every dismissal path, so subsequent API requests use the
-/// refreshed session even when the challenge completes without a navigation.
+/// Presents this forum's Cloudflare interstitial in a WKWebView seeded with
+/// the user's existing web-login cookies. Cookie changes are synced immediately,
+/// with a final sync on every dismissal path, so subsequent API requests use
+/// the refreshed session even when the challenge completes without a navigation.
 final class ChallengeViewController: BaseViewController {
     private let targetURL: URL
     private let userAgent: String?
@@ -276,9 +278,8 @@ final class ChallengeViewController: BaseViewController {
     }
 
     /// Convenience for presenting the challenge flow from any view controller.
-    static func present(from presenter: UIViewController) {
-        guard let url = URL(string: "https://linux.do/challenge") else { return }
-        let vc = ChallengeViewController(targetURL: url, userAgent: WebCookieStore.shared.userAgent)
+    static func present(from presenter: UIViewController, challengeURL: URL) {
+        let vc = ChallengeViewController(targetURL: challengeURL, userAgent: WebCookieStore.shared.userAgent)
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .pageSheet
         if let sheet = nav.sheetPresentationController {
@@ -297,7 +298,7 @@ final class ChallengeViewController: BaseViewController {
     @MainActor
     static func presentAndWait(
         from presenter: UIViewController,
-        challengeURL: URL = URL(string: "https://linux.do/challenge")!,
+        challengeURL: URL,
         prefersFullScreen: Bool = false
     ) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in

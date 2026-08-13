@@ -26,8 +26,9 @@ struct GuestContentLoadFailure {
     }
 }
 
-/// Coalesces concurrent `challenge_required` failures into a single linux.do
-/// challenge sheet. Password-login runs `/challenge` in its own WKWebView.
+/// Coalesces concurrent `challenge_required` failures into a single
+/// Cloudflare interstitial sheet. Password-login runs the forum's own
+/// interstitial URL in its WKWebView (linux.do `/challenge`, idcflare `/login`).
 enum GuestChallengePresenter {
     @MainActor
     private static var isPresenting = false
@@ -43,12 +44,14 @@ enum GuestChallengePresenter {
         from presenter: UIViewController,
         api: DiscourseAPI
     ) async -> Bool {
-        guard api.isLinuxDo else { return false }
+        guard api.isLinuxDoFamily,
+              let challengeURL = ForumPolicy.cloudflareInterstitialURL(for: api.baseURL)
+        else { return false }
         if isPresenting {
             return await withCheckedContinuation { waiters.append($0) }
         }
         isPresenting = true
-        await ChallengeViewController.presentAndWait(from: presenter)
+        await ChallengeViewController.presentAndWait(from: presenter, challengeURL: challengeURL)
         let cleared = WebCookieStore.shared.hasValidClearance(for: api.baseURL)
         let pending = waiters
         waiters = []
@@ -87,13 +90,13 @@ enum GuestChallengeUI {
 }
 
 extension UIViewController {
-    /// Presents the linux.do Cloudflare challenge sheet (coalesced), then
+    /// Presents the forum's Cloudflare interstitial sheet (coalesced), then
     /// retries only when a valid `cf_clearance` cookie is present.
     func presentGuestChallengeThenRetry(
         on api: DiscourseAPI,
         retry: @escaping () async -> Void
     ) {
-        guard api.isLinuxDo else { return }
+        guard api.isLinuxDoFamily else { return }
         Task { @MainActor in
             let cleared = await GuestChallengePresenter.presentAndWaitForClearance(
                 from: self,
@@ -113,7 +116,7 @@ extension UIViewController {
         isChallengeRequired: Bool,
         retry: @escaping () async -> Void
     ) async {
-        guard api.isLinuxDo,
+        guard api.isLinuxDoFamily,
               isChallengeRequired,
               view.window != nil,
               GuestChallengePresenter.consumeHomeAutoPresent()

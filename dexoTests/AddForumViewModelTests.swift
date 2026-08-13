@@ -24,6 +24,27 @@ final class AddForumViewModelTests: XCTestCase {
         )
     }
 
+    func testChallengeRequiredIsReturnedForIdcflare() async {
+        let loader: AddForumViewModel.BasicInfoLoader = { _ in
+            throw DiscourseAPIError(
+                messages: ["Cloudflare challenge required"],
+                errorType: "challenge_required"
+            )
+        }
+        let viewModel = AddForumViewModel(basicInfoLoader: loader)
+        viewModel.urlString = "https://idcflare.com"
+
+        let result = await viewModel.addForum()
+
+        guard case .challengeRequired = result else {
+            return XCTFail("Expected a Cloudflare challenge result for idcflare")
+        }
+        XCTAssertEqual(
+            ForumPolicy.cloudflareInterstitialURL(for: "https://idcflare.com"),
+            URL(string: "https://idcflare.com/login")
+        )
+    }
+
     func testNonLinuxChallengeRemainsAConnectionFailure() async {
         let challengeError = DiscourseAPIError(
             messages: ["Cloudflare challenge required"],

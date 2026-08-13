@@ -679,7 +679,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         errorLabel.isHidden = viewModel.errorMessage == nil
         challengeButton.isHidden = !(
             viewModel.requiresChallenge
-                && api.isLinuxDo
+                && api.isLinuxDoFamily
                 && viewModel.topic == nil
                 && !viewModel.isLoading
         )

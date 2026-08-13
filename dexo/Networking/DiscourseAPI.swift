@@ -259,8 +259,15 @@ final class DiscourseAPI {
 
     /// linux.do's `/session/current.json` returns an empty body, so callers must skip it
     /// and derive the username from `/notifications.json` instead.
+    /// Exact `linux.do` only — not idcflare (MessageBus / follow / empty session).
     var isLinuxDo: Bool {
         URL(string: baseURL)?.host?.lowercased() == "linux.do"
+    }
+
+    /// linux.do family including sister Discourse idcflare.com. Use this to
+    /// gate guest Cloudflare prompts and stored-cookie fetches, not MessageBus.
+    var isLinuxDoFamily: Bool {
+        ForumPolicy.isLinuxDoFamily(baseURL: baseURL)
     }
 
     private static func makeSession(interceptor: DiscourseAuthInterceptor, baseURL: String) -> Session {
@@ -856,7 +863,7 @@ final class DiscourseAPI {
     ///   - topicTime: total time spent on the topic in milliseconds
     ///   - timings: per-post duration map (postNumber → milliseconds visible)
     func postTopicTimings(topicId: Int, topicTime: Int, timings: [Int: Int]) async throws {
-        if ForumPolicy.isLinuxDoFamily(baseURL: baseURL) {
+        if ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: baseURL) {
             let generation = AppSettings.shared.linuxDoReadTimingsActivationGeneration
             if lastTopicTimingsActivationGeneration != generation {
                 topicTimingsCircuitBreaker.reset()
@@ -936,7 +943,7 @@ final class DiscourseAPI {
                 trippedBreaker: trippedBreaker,
                 errorSummary: summary
             )
-            if trippedBreaker, ForumPolicy.isLinuxDoFamily(baseURL: baseURL) {
+            if trippedBreaker, ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: baseURL) {
                 AppSettings.shared.linuxDoReadTimingsEnabled = false
                 lastTopicTimingsReportingEnabled = false
                 NotificationCenter.default.post(

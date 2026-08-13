@@ -101,7 +101,7 @@ private nonisolated final class PasswordLoginScriptBridge: NSObject, WKScriptMes
 /// a MainActor-isolated session cannot hop without deadlock/crash.
 private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WKUIDelegate, WKNavigationDelegate, @unchecked Sendable {
     weak var session: PasswordLoginWebSession?
-    /// During in-place `/challenge`, `window.open` must stay in this WebView
+    /// During in-place CF interstitial, `window.open` must stay in this WebView
     /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
     var isChallengeMode = false
 
@@ -197,7 +197,7 @@ final class PasswordLoginWebSession {
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
         // Skip DoH MITM so hCaptcha and csrf/session.json share the same
-        // direct TLS as in-place `/challenge` (no-op on iOS 15).
+        // direct TLS as in-place CF interstitial (no-op on iOS 15).
         if #available(iOS 17.0, *) {
             wkConfig.websiteDataStore.proxyConfigurations = []
         }
@@ -212,7 +212,7 @@ final class PasswordLoginWebSession {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // Persist `__dexoPasswordLogin` across `/challenge` navigations so
+        // Persist `__dexoPasswordLogin` across CF interstitial navigations so
         // csrf → hCaptcha create → session.json stay in this WebView kernel.
         controller.addUserScript(WKUserScript(
             source: Self.loginJavaScript(config: config),
@@ -281,9 +281,10 @@ final class PasswordLoginWebSession {
         return cookies.contains { $0.name == "cf_clearance" }
     }
 
-    /// Loads `/challenge` in this session's WKWebView (same TLS kernel that
-    /// will run csrf / hCaptcha create / session.json). Does not present a
-    /// second `ChallengeViewController`.
+    /// Loads this forum's Cloudflare interstitial in this session's WKWebView
+    /// (same TLS kernel that will run csrf / hCaptcha create / session.json).
+    /// Does not present a second `ChallengeViewController`. linux.do uses
+    /// `/challenge`; idcflare uses `/login` because `/challenge` is 404.
     func runInPlaceCloudflareChallenge(url: URL) async throws {
         guard let webView else {
             throw PasswordLoginError.unexpected(status: 0, phase: "cloudflare", body: "no webview")
@@ -671,8 +672,8 @@ final class PasswordLoginWebSession {
     }
 
     /// Discourse csrf → hCaptcha create → session.json. Injected as a user
-    /// script so it survives in-place `/challenge` navigation. Fetches use
-    /// `credentials: 'include'` and never set Cookie / User-Agent / Origin.
+    /// script so it survives in-place Cloudflare interstitial navigation.
+    /// Fetches use `credentials: 'include'` and never set Cookie / User-Agent / Origin.
     nonisolated static func loginJavaScript(config: PasswordLoginConfig) -> String {
         let endpointsJSON = (try? String(data: JSONEncoder().encode(config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"
         return """
