@@ -272,7 +272,7 @@ final class PasswordLoginWebSession {
                         let wrapped = PasswordLoginError.unexpected(
                             status: 0,
                             phase: "evaluate",
-                            body: error.localizedDescription
+                            body: PasswordLoginCrashBreadcrumb.exceptionDiagnostic(error)
                         )
                         PasswordLoginCrashBreadcrumb.record(
                             .loginJsResult,

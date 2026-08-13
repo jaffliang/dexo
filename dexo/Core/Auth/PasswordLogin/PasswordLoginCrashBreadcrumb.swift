@@ -155,11 +155,36 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
                 return String(describing: login)
             }
         }
+        let ns = error as NSError
+        if ns.userInfo["exception.name"] != nil {
+            return clip(exceptionDiagnostic(error), limit: 180)
+        }
         return clip(sanitize(error.localizedDescription), limit: 180)
     }
 
-    static func sanitizeForReport(_ value: String) -> String {
-        sanitize(value)
+    /// Name + reason (+ a few stack frames) from `DexoExceptionCatcher` NSError userInfo.
+    static func exceptionDiagnostic(_ error: Error) -> String {
+        let ns = error as NSError
+        var parts: [String] = []
+        if let name = ns.userInfo["exception.name"] as? String, !name.isEmpty {
+            parts.append("name=\(name)")
+        }
+        let reason = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !reason.isEmpty {
+            parts.append(sanitize(reason, limit: 400))
+        }
+        if let stack = ns.userInfo["exception.stack"] as? String, !stack.isEmpty {
+            let frames = stack.split(separator: "\n", omittingEmptySubsequences: false).prefix(12).joined(separator: " | ")
+            parts.append("stack=\(frames)")
+        }
+        if parts.isEmpty {
+            return clip(sanitize(String(describing: error)), limit: 400)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    static func sanitizeForReport(_ value: String, limit: Int = 240) -> String {
+        sanitize(value, limit: limit)
     }
 
     private static func mutate(_ body: (inout State) -> Void) {
@@ -212,7 +237,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
         #endif
     }
 
-    private static func sanitize(_ value: String) -> String {
+    private static func sanitize(_ value: String, limit: Int = 240) -> String {
         var text = value
         let passwordKeys = ["password", "passwd", "second_factor_token"]
         for key in passwordKeys {
@@ -225,7 +250,7 @@ nonisolated enum PasswordLoginCrashBreadcrumb: Sendable {
                 )
             }
         }
-        return clip(text.replacingOccurrences(of: "\n", with: " "), limit: 240)
+        return clip(text.replacingOccurrences(of: "\n", with: " "), limit: limit)
     }
 
     private static func clip(_ value: String, limit: Int) -> String {

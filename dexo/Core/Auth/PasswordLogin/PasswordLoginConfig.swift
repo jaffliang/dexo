@@ -59,8 +59,23 @@ enum PasswordLoginError: Error, LocalizedError {
             return String(localized: "password_login.error.csrf")
         case .missingSessionCookie:
             return String(localized: "password_login.error.session")
-        case .unexpected:
-            return String(localized: "password_login.error.unknown")
+        case .unexpected(let status, let phase, let body):
+            let safeBody = PasswordLoginCrashBreadcrumb.sanitizeForReport(body, limit: 180)
+            return String(localized: "password_login.error.unexpected \(phase) \(String(status)) \(safeBody)")
         }
+    }
+
+    /// Label text for any thrown login error, including caught `NSException`s.
+    static func displayMessage(for error: Error) -> String {
+        if let login = error as? PasswordLoginError, let text = login.errorDescription, !text.isEmpty {
+            return text
+        }
+        let ns = error as NSError
+        if let name = ns.userInfo["exception.name"] as? String, !name.isEmpty {
+            let reason = PasswordLoginCrashBreadcrumb.sanitizeForReport(ns.localizedDescription, limit: 180)
+            return "\(name): \(reason)"
+        }
+        let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? String(localized: "password_login.error.unknown") : text
     }
 }

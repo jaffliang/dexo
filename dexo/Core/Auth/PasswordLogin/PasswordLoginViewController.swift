@@ -336,11 +336,13 @@ final class PasswordLoginViewController: BaseViewController {
             webSession = nil
         } catch {
             PasswordLoginCrashBreadcrumb.recordError(error)
+            LastFatalExceptionStore.recordLoginFailure(error)
             await dismissCaptchaIfNeeded()
             step = .form
             setBusy(false, status: nil)
-            errorLabel.text = (error as? LocalizedError)?.errorDescription
-                ?? String(localized: "password_login.error.unknown")
+            errorLabel.text = PasswordLoginError.displayMessage(for: error)
+            showCopyHint(isFatalException: LastFatalExceptionStore.peekReport().map(LastFatalExceptionStore.isFatalExceptionReport) ?? false)
+            LastFatalExceptionPresenter.presentIfNeeded(from: self)
             webSession?.tearDown()
             webSession = nil
         }
@@ -508,9 +510,8 @@ final class PasswordLoginViewController: BaseViewController {
     private func offerUnfinishedBreadcrumbIfNeeded() {
         if LastFatalExceptionStore.peekReport() != nil {
             // Do not consume/wipe the trail or crash file before the copy UI.
-            didOfferBreadcrumb = true
-            debugBreadcrumbLabel.text = String(localized: "password_login.debug.exception_hint")
-            debugBreadcrumbLabel.isHidden = false
+            let fatal = LastFatalExceptionStore.peekReport().map(LastFatalExceptionStore.isFatalExceptionReport) ?? false
+            showCopyHint(isFatalException: fatal)
             DispatchQueue.main.async { [weak self] in
                 LastFatalExceptionPresenter.presentIfNeeded(from: self)
             }
@@ -521,9 +522,6 @@ final class PasswordLoginViewController: BaseViewController {
             lastUnfinishedBreadcrumb = trail
             debugBreadcrumbLabel.text = String(localized: "password_login.debug.breadcrumb_hint")
             debugBreadcrumbLabel.isHidden = false
-            DispatchQueue.main.async { [weak self] in
-                self?.presentBreadcrumbAlert()
-            }
             return
         }
         if lastUnfinishedBreadcrumb != nil {
@@ -532,26 +530,20 @@ final class PasswordLoginViewController: BaseViewController {
         }
     }
 
-    @objc private func debugBreadcrumbTapped() {
-        if LastFatalExceptionStore.peekReport() != nil {
-            LastFatalExceptionPresenter.presentIfNeeded(from: self)
-            return
-        }
-        presentBreadcrumbAlert()
+    private func showCopyHint(isFatalException: Bool) {
+        didOfferBreadcrumb = true
+        debugBreadcrumbLabel.text = String(
+            localized: isFatalException
+                ? "password_login.debug.exception_hint"
+                : "password_login.debug.copy_hint"
+        )
+        debugBreadcrumbLabel.isHidden = false
     }
 
-    private func presentBreadcrumbAlert() {
-        guard let trail = lastUnfinishedBreadcrumb else { return }
-        let alert = UIAlertController(
-            title: String(localized: "password_login.debug.breadcrumb_title"),
-            message: trail,
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: String(localized: "post.raw.copy"), style: .default) { _ in
-            UIPasteboard.general.string = trail
-        })
-        alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .cancel))
-        present(alert, animated: true)
+    @objc private func debugBreadcrumbTapped() {
+        LastFatalExceptionPresenter.copyToPasteboardAndConfirm(from: self)
+        debugBreadcrumbLabel.text = String(localized: "post.raw.copied")
+        debugBreadcrumbLabel.isHidden = false
     }
 
     private func dismissCaptchaIfNeeded() async {
