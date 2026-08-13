@@ -61,6 +61,63 @@ final class WebCookieStore {
         cookies(for: url).map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
+    /// Cloudflare cookies that guest (no User-Api-Key) requests may send.
+    /// Never include `_t` / `_forum_session` — those would impersonate a login.
+    static let guestCloudflareCookieNames: Set<String> = ["cf_clearance", "__cf_bm"]
+
+    static func isGuestCloudflareCookieName(_ name: String) -> Bool {
+        guestCloudflareCookieNames.contains(name)
+    }
+
+    /// Attaches stored cookies and the challenge WKWebView User-Agent.
+    ///
+    /// Always `setValue`s (never `addValue`) so Alamofire's default User-Agent
+    /// is replaced and a second `Cookie` header is never created.
+    ///
+    /// Pass `guestBrowsing: true` when there is no User-Api-Key: only
+    /// `cf_clearance` and `__cf_bm` are sent.
+    func applySessionHeaders(to request: inout URLRequest, guestBrowsing: Bool = false) {
+        guard let url = request.url else { return }
+        let matching = cookies(for: url).filter { cookie in
+            !guestBrowsing || Self.isGuestCloudflareCookieName(cookie.name)
+        }
+        let header = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        if !header.isEmpty {
+            request.setValue(header, forHTTPHeaderField: "Cookie")
+        }
+        if let ua = userAgent, !ua.isEmpty {
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        }
+    }
+
+    /// Drops stale `cf_clearance` for this host so Cloudflare will show the
+    /// challenge widget instead of silently skipping it.
+    func removeClearanceCookies(matching url: URL) {
+        guard let host = url.host?.lowercased() else { return }
+        lock.lock()
+        jar = jar.filter { _, cookie in
+            !(cookie.name == "cf_clearance" && Self.cookieDomain(cookie.domain, matchesHost: host))
+        }
+        lock.unlock()
+        save()
+    }
+
+    @MainActor
+    func removeClearanceCookies(from dataStore: WKWebsiteDataStore, matching url: URL) async {
+        guard let host = url.host?.lowercased() else { return }
+        let store = dataStore.httpCookieStore
+        let all = await withCheckedContinuation { cont in
+            store.getAllCookies { cont.resume(returning: $0) }
+        }
+        for cookie in all where cookie.name == "cf_clearance"
+            && Self.cookieDomain(cookie.domain, matchesHost: host)
+        {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                store.delete(cookie) { cont.resume() }
+            }
+        }
+    }
+
     func mergeResponseHeaders(_ headers: [AnyHashable: Any], for url: URL) {
         var stringHeaders: [String: String] = [:]
         for (k, v) in headers { stringHeaders["\(k)"] = "\(v)" }

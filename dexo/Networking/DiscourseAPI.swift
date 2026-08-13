@@ -30,9 +30,10 @@ struct TopicTimingCircuitBreaker {
 func assessTopicTimingResponse(
     statusCode: Int?,
     data: Data?,
-    errorDescription: String?
+    errorDescription: String?,
+    headers: HTTPURLResponse? = nil
 ) -> TopicTimingResponseAssessment {
-    if isCloudflareChallengeResponse(data) {
+    if isCloudflareChallengeResponse(data, headers: headers) {
         return TopicTimingResponseAssessment(
             outcome: .cloudflareChallenge,
             statusCode: statusCode,
@@ -422,9 +423,10 @@ final class DiscourseAPI {
         var headers = HTTPHeaders()
 
         // The add-forum probe runs before a ForumInstance or the web-auth
-        // sentinel exists in Keychain. Explicitly carry the cookies captured
-        // by ChallengeViewController for that first request instead of
-        // relying on the authenticated-request interceptor path.
+        // sentinel exists in Keychain. Explicitly carry cookies captured by
+        // ChallengeViewController so the first request still works if the
+        // interceptor path is skipped. Guest feed/topic loads now get the
+        // same headers from DiscourseAuthInterceptor without an API key.
         if includeStoredWebCookies,
            let url = URL(string: baseURL + route.path)
         {
@@ -663,7 +665,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -688,7 +690,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -718,7 +720,7 @@ final class DiscourseAPI {
             encoding: URLEncoding.default,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -740,7 +742,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -900,7 +902,8 @@ final class DiscourseAPI {
         let assessment = assessTopicTimingResponse(
             statusCode: response.response?.statusCode,
             data: response.data,
-            errorDescription: response.error?.localizedDescription
+            errorDescription: response.error?.localizedDescription,
+            headers: response.response
         )
         if assessment.outcome == .success {
             _ = topicTimingsCircuitBreaker.record(.success)
@@ -993,9 +996,7 @@ final class DiscourseAPI {
         guard let url = URL(string: baseURL) else { return nil }
         var req = URLRequest(url: url)
         req.setValue("text/html", forHTTPHeaderField: "Accept")
-        let cookieHeader = WebCookieStore.shared.cookieHeader(for: url)
-        if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
-        if let ua = WebCookieStore.shared.userAgent { req.setValue(ua, forHTTPHeaderField: "User-Agent") }
+        WebCookieStore.shared.applySessionHeaders(to: &req)
         let response = await session.request(req).serializingData().response
         if authenticationFailureError(
             statusCode: response.response?.statusCode,
@@ -1158,13 +1159,15 @@ final class DiscourseAPI {
         // (proxy 5xx, partial replies, session-expired 403s) can carry Set-Cookie directives
         // that would clobber the `_t` session cookie and log the user out silently.
         if let httpResponse = response.response, let url = httpResponse.url,
-           let statusCode = response.response?.statusCode, (200 ..< 300).contains(statusCode),
-           KeychainHelper.getUserApiKey(for: baseURL) == AuthManager.webAuthSentinel
+           let statusCode = response.response?.statusCode, (200 ..< 300).contains(statusCode)
         {
-            WebCookieStore.shared.mergeResponseHeaders(httpResponse.allHeaderFields, for: url)
+            let apiKey = KeychainHelper.getUserApiKey(for: baseURL)
+            if apiKey == nil || apiKey == AuthManager.webAuthSentinel {
+                WebCookieStore.shared.mergeResponseHeaders(httpResponse.allHeaderFields, for: url)
+            }
         }
 
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
 
@@ -1277,10 +1280,13 @@ struct DiscourseAPIError: LocalizedError {
     }
 }
 
-/// Detects Cloudflare's challenge interstitial in a response body. Cloudflare
-/// challenges may arrive with any status code (200, 403, 503), so the body is
-/// the only reliable signal.
-func isCloudflareChallengeResponse(_ data: Data?) -> Bool {
+/// Detects Cloudflare's challenge interstitial. JSON/text APIs often omit the
+/// HTML body markers; `cf-mitigated: challenge` plus `Server: cloudflare` is
+/// the header signal for those. HTML body scan remains the fallback.
+func isCloudflareChallengeResponse(_ data: Data?, headers: HTTPURLResponse? = nil) -> Bool {
+    if isCloudflareMitigatedChallenge(headers) {
+        return true
+    }
     guard let data, !data.isEmpty else { return false }
     // Cap the scan — Cloudflare pages are small HTML; real JSON can be huge.
     let prefix = data.prefix(65536)
@@ -1289,6 +1295,13 @@ func isCloudflareChallengeResponse(_ data: Data?) -> Bool {
         || snippet.contains("cf-browser-verification")
         || snippet.contains("cf-challenge-running")
         || snippet.contains("__cf_chl_")
+}
+
+func isCloudflareMitigatedChallenge(_ response: HTTPURLResponse?) -> Bool {
+    guard let response else { return false }
+    let mitigated = response.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
+    guard mitigated == "challenge" else { return false }
+    return response.value(forHTTPHeaderField: "Server")?.lowercased() == "cloudflare"
 }
 
 // MARK: - Auth Interceptor
@@ -1330,17 +1343,16 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         }
 
         var request = urlRequest
-        if let userApiKey = KeychainHelper.getUserApiKey(for: baseURL) {
+        let userApiKey = KeychainHelper.getUserApiKey(for: baseURL)
+        // Attach WebCookieStore cookies + UA whether or not an API key exists.
+        // Guests have no User-Api-Key: only `cf_clearance` and `__cf_bm` plus
+        // the challenge WKWebView User-Agent. Never send `_t` / `_forum_session`
+        // on that path (would fake a login). Alamofire always sets a default
+        // User-Agent; applySessionHeaders overwrites it with setValue so Cookie
+        // is never duplicated.
+        WebCookieStore.shared.applySessionHeaders(to: &request, guestBrowsing: userApiKey == nil)
+        if let userApiKey {
             if userApiKey == AuthManager.webAuthSentinel {
-                if let url = request.url {
-                    let header = WebCookieStore.shared.cookieHeader(for: url)
-                    if !header.isEmpty {
-                        request.setValue(header, forHTTPHeaderField: "Cookie")
-                    }
-                    if let ua = WebCookieStore.shared.userAgent {
-                        request.setValue(ua, forHTTPHeaderField: "User-Agent")
-                    }
-                }
                 let isMutating = request.httpMethod == "POST" || request.httpMethod == "PUT" || request.httpMethod == "DELETE"
                 if isMutating {
                     if request.value(forHTTPHeaderField: "Accept") == nil {
@@ -1455,9 +1467,7 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         }
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        let cookieHeader = WebCookieStore.shared.cookieHeader(for: url)
-        if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
-        if let ua = WebCookieStore.shared.userAgent { req.setValue(ua, forHTTPHeaderField: "User-Agent") }
+        WebCookieStore.shared.applySessionHeaders(to: &req)
         session.request(req).responseData { response in
             guard let data = response.data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -107,6 +107,8 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
         return label
     }()
 
+    private let challengeButton = GuestChallengeUI.makePassButton()
+
     init(api: DiscourseAPI) {
         self.api = api
         self.viewModel = SearchViewModel(api: api)
@@ -133,6 +135,7 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
         view.addSubview(tableView)
         view.addSubview(activityIndicator)
         view.addSubview(emptyLabel)
+        view.addSubview(challengeButton)
 
         NSLayoutConstraint.activate([
             tableView.topAnchor.constraint(equalTo: filterBar.bottomAnchor),
@@ -147,7 +150,12 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
             emptyLabel.centerYAnchor.constraint(equalTo: tableView.centerYAnchor),
             emptyLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 32),
             emptyLabel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -32),
+
+            challengeButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            challengeButton.topAnchor.constraint(equalTo: emptyLabel.bottomAnchor, constant: 16),
         ])
+
+        challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -406,6 +414,11 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
         } else {
             emptyLabel.isHidden = true
         }
+        challengeButton.isHidden = !(
+            viewModel.requiresChallenge
+                && api.isLinuxDo
+                && !viewModel.isSearching
+        )
 
         updateFilterButtons()
 
@@ -430,6 +443,15 @@ final class SearchViewController: ObservableViewController, UISearchBarDelegate 
         searchTask?.cancel()
         searchTask = Task {
             await viewModel.search(term: term)
+        }
+    }
+
+    @objc private func challengeTapped() {
+        presentGuestChallengeThenRetry(on: api) { [weak self] in
+            guard let self else { return }
+            let term = self.searchController.searchBar.text ?? ""
+            guard !term.isEmpty else { return }
+            await self.viewModel.search(term: term)
         }
     }
 

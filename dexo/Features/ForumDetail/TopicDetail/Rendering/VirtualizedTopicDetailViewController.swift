@@ -396,6 +396,8 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         return label
     }()
 
+    private let challengeButton = GuestChallengeUI.makePassButton()
+
     private let topLoadingBar: UIView = {
         let bar = UIView()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -472,11 +474,13 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         view.addSubview(collectionView)
         view.addSubview(activityIndicator)
         view.addSubview(errorLabel)
+        view.addSubview(challengeButton)
         view.addSubview(topLoadingBar)
         view.addSubview(jumpOverlay)
         view.addSubview(bottomBar)
         view.addSubview(floatingReplyButton)
         floatingReplyButton.addTarget(self, action: #selector(floatingReplyTapped), for: .touchUpInside)
+        challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
         NSLayoutConstraint.activate([
             collectionView.topAnchor.constraint(equalTo: view.topAnchor),
             collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -488,6 +492,8 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
             errorLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             errorLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
             errorLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+            challengeButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            challengeButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 16),
             topLoadingBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             topLoadingBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             topLoadingBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -671,6 +677,12 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         }
         errorLabel.text = viewModel.errorMessage
         errorLabel.isHidden = viewModel.errorMessage == nil
+        challengeButton.isHidden = !(
+            viewModel.requiresChallenge
+                && api.isLinuxDo
+                && viewModel.topic == nil
+                && !viewModel.isLoading
+        )
         topLoadingBar.alpha = viewModel.isLoadingEarlier ? 1 : 0
         bottomBar.setOPOnlySelected(viewModel.isFilteringByOP)
         handleLoadErrorIfNeeded()
@@ -745,8 +757,28 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     private func handleLoadErrorIfNeeded() {
         guard let error = viewModel.lastLoadError else { return }
+        // Initial empty-state load shows a Pass Cloudflare button instead of
+        // the generic alert prompt. Pagination / action errors keep the alert.
+        if viewModel.requiresChallenge, viewModel.topic == nil {
+            viewModel.lastLoadError = nil
+            return
+        }
         viewModel.lastLoadError = nil
         presentChallengePromptIfNeeded(error: error, on: api)
+    }
+
+    @objc private func challengeTapped() {
+        presentGuestChallengeThenRetry(on: api) { [weak self] in
+            await self?.retryInitialLoadAfterChallenge()
+        }
+    }
+
+    private func retryInitialLoadAfterChallenge() async {
+        if viewModel.isTreeMode {
+            await viewModel.loadNestedTopic(id: topicId, containerWidth: view.bounds.width)
+        } else {
+            await viewModel.loadTopic(id: topicId, containerWidth: view.bounds.width, nearPostNumber: initialFloor)
+        }
     }
 
     private func retryPagination() {

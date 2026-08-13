@@ -148,6 +148,14 @@ final class ChallengeViewController: BaseViewController {
             }
             navigationItem.rightBarButtonItem?.isEnabled = true
 
+            // Stale cf_clearance makes Cloudflare skip the widget and leave
+            // the session blocked. Drop it from the native jar and this
+            // WebView's store before loading /challenge.
+            WebCookieStore.shared.removeClearanceCookies(matching: targetURL)
+            await WebCookieStore.shared.removeClearanceCookies(
+                from: webView.configuration.websiteDataStore,
+                matching: targetURL
+            )
             await seedCookies(in: webView)
             guard !Task.isCancelled else { return }
             webView.configuration.websiteDataStore.httpCookieStore.add(coordinator)
