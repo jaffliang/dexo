@@ -57,25 +57,36 @@ final class WebCookieStore {
         }
     }
 
-    func cookieHeader(for url: URL) -> String {
-        cookies(for: url).map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    func cookieHeader(for url: URL, excludingNames: Set<String> = []) -> String {
+        cookies(for: url)
+            .filter { !excludingNames.contains($0.name) }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
     }
 
-    /// Attaches stored web cookies and the challenge/login User-Agent when the
-    /// request has not already set those headers. Used for guest browsing
-    /// after a Cloudflare challenge as well as web-login sessions.
-    func applySessionHeaders(to request: inout URLRequest) {
+    /// Cloudflare clearance cookies that must ride along on guest GETs.
+    static func isCloudflareCookieName(_ name: String) -> Bool {
+        name.hasPrefix("cf_") || name.hasPrefix("__cf")
+    }
+
+    /// Attaches stored cookies and the challenge WKWebView User-Agent.
+    ///
+    /// Always `setValue`s (never `addValue`) so Alamofire's default User-Agent
+    /// is replaced and a second `Cookie` header is never created.
+    ///
+    /// Pass `guestBrowsing: true` when there is no User-Api-Key: only
+    /// Cloudflare cookies (`cf_clearance`, `__cf_bm`, …) are sent so a leftover
+    /// `_t` cannot impersonate a logged-in session.
+    func applySessionHeaders(to request: inout URLRequest, guestBrowsing: Bool = false) {
         guard let url = request.url else { return }
-        if request.value(forHTTPHeaderField: "Cookie") == nil {
-            let header = cookieHeader(for: url)
-            if !header.isEmpty {
-                request.setValue(header, forHTTPHeaderField: "Cookie")
-            }
+        let matching = cookies(for: url).filter { cookie in
+            !guestBrowsing || Self.isCloudflareCookieName(cookie.name)
         }
-        if request.value(forHTTPHeaderField: "User-Agent") == nil,
-           let ua = userAgent,
-           !ua.isEmpty
-        {
+        let header = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        if !header.isEmpty {
+            request.setValue(header, forHTTPHeaderField: "Cookie")
+        }
+        if let ua = userAgent, !ua.isEmpty {
             request.setValue(ua, forHTTPHeaderField: "User-Agent")
         }
     }

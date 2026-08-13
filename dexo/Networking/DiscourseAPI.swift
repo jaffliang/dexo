@@ -1331,11 +1331,16 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         }
 
         var request = urlRequest
-        // Guest linux.do browsing has no API key and no web-auth sentinel, but
-        // still needs `cf_clearance` plus the WKWebView User-Agent after the
-        // user passes the Cloudflare challenge.
-        WebCookieStore.shared.applySessionHeaders(to: &request)
-        if let userApiKey = KeychainHelper.getUserApiKey(for: baseURL) {
+        let userApiKey = KeychainHelper.getUserApiKey(for: baseURL)
+        // Attach WebCookieStore cookies + UA whether or not an API key exists.
+        // Guests have no User-Api-Key, so the previous sentinel-only path never
+        // sent `cf_clearance` or the challenge WKWebView User-Agent — passing
+        // `/challenge` could not unblock the home feed. Alamofire always sets a
+        // default User-Agent; applySessionHeaders overwrites it. Guest GETs
+        // omit `_t` / `_forum_session` so leftover session cookies cannot
+        // impersonate a login.
+        WebCookieStore.shared.applySessionHeaders(to: &request, guestBrowsing: userApiKey == nil)
+        if let userApiKey {
             if userApiKey == AuthManager.webAuthSentinel {
                 let isMutating = request.httpMethod == "POST" || request.httpMethod == "PUT" || request.httpMethod == "DELETE"
                 if isMutating {
