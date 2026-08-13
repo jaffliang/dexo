@@ -1,0 +1,136 @@
+import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
+/// Pure URL rewrite / host-policy helpers for the iOS 15 loopback DoH gateway.
+///
+/// The app's `URLProtocol` uses these so Alamofire and URLSession keep the
+/// original HTTPS URL for cookies, redirects, and `ForumURLPolicy`, while the
+/// bytes go to `http://127.0.0.1:<port>/...`.
+public enum DoHGatewayPolicy {
+    public static let skipHeader = "X-Dexo-Gateway-Skip"
+    public static let upstreamHostHeader = "X-Dexo-Gateway-Host"
+    public static let upstreamPortHeader = "X-Dexo-Gateway-Port"
+    public static let upstreamSchemeHeader = "X-Dexo-Gateway-Scheme"
+
+    public struct Configuration: Equatable, Sendable {
+        public var isEnabled: Bool
+        public var gatewayPort: Int
+        public var dohHost: String?
+
+        public init(isEnabled: Bool, gatewayPort: Int, dohHost: String?) {
+            self.isEnabled = isEnabled
+            self.gatewayPort = gatewayPort
+            self.dohHost = dohHost
+        }
+
+        public var isProxyActive: Bool {
+            isEnabled && gatewayPort > 0
+        }
+    }
+
+    public static func shouldRewrite(_ url: URL, configuration: Configuration) -> Bool {
+        guard configuration.isProxyActive else { return false }
+        guard url.scheme?.lowercased() == "https" else { return false }
+        guard let host = url.host, !host.isEmpty else { return false }
+        if isLoopbackHost(host) || isIPAddress(host) {
+            return false
+        }
+        if let dohHost = configuration.dohHost, host.caseInsensitiveCompare(dohHost) == .orderedSame {
+            return false
+        }
+        return true
+    }
+
+    public static func shouldRewrite(_ request: URLRequest, configuration: Configuration) -> Bool {
+        if request.value(forHTTPHeaderField: skipHeader) != nil {
+            return false
+        }
+        if request.value(forHTTPHeaderField: upstreamHostHeader) != nil {
+            return false
+        }
+        guard let url = request.url else { return false }
+        return shouldRewrite(url, configuration: configuration)
+    }
+
+    public static func rewrittenRequest(
+        _ request: URLRequest,
+        configuration: Configuration
+    ) -> URLRequest? {
+        guard shouldRewrite(request, configuration: configuration),
+              let url = request.url,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else {
+            return nil
+        }
+
+        let originalHost = url.host ?? ""
+        let originalPort = url.port ?? 443
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = configuration.gatewayPort
+
+        guard let rewrittenURL = components.url else { return nil }
+        var rewritten = request
+        rewritten.url = rewrittenURL
+        rewritten.setValue(originalHost, forHTTPHeaderField: upstreamHostHeader)
+        rewritten.setValue(String(originalPort), forHTTPHeaderField: upstreamPortHeader)
+        rewritten.setValue("https", forHTTPHeaderField: upstreamSchemeHeader)
+        rewritten.setValue(originalHost, forHTTPHeaderField: "Host")
+        return rewritten
+    }
+
+    public static func isLoopbackHost(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        return normalized == "localhost"
+            || normalized == "127.0.0.1"
+            || normalized == "::1"
+            || normalized == "0.0.0.0"
+            || normalized.hasPrefix("127.")
+    }
+
+    public static func isIPAddress(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, normalized, &ipv4) == 1 {
+            return true
+        }
+        var ipv6 = in6_addr()
+        return inet_pton(AF_INET6, normalized, &ipv6) == 1
+    }
+
+    public static func dohHost(from serverURLString: String) -> String? {
+        normalizedDoHURL(serverURLString)?.host
+    }
+
+    /// Mirrors `EncryptedDNSManager.normalizedServerURL` so policy tests do not
+    /// need to import the app target.
+    public static func normalizedDoHURL(_ input: String) -> URL? {
+        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if !value.contains("://") {
+            value = "https://" + value
+        }
+        guard let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              let url = components.url
+        else {
+            return nil
+        }
+        return url
+    }
+
+    public static func isProxyEnablementAllowed(isEnabled: Bool, serverURLString: String) -> Bool {
+        guard isEnabled else { return true }
+        return normalizedDoHURL(serverURLString) != nil
+    }
+}

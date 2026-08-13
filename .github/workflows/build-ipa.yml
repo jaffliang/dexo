@@ -19,8 +19,24 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v2
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache DoH gateway Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Native/DoHGateway
+
       - name: Generate Xcode project
         run: mise x -- tuist install && mise x -- tuist generate
+
+      - name: Build iOS DoH gateway static library
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          chmod +x scripts/build-doh-gateway.sh
+          ./scripts/build-doh-gateway.sh
 
       - name: Set build number
         id: buildnumber

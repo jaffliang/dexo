@@ -42,6 +42,7 @@ This fork keeps the upstream Discourse client and adds linux.do / idcflare.com s
 - [x] **Third-party IME** — Password field is visible by default; secure entry is on only while hiding, so iOS 15 third-party keyboards keep working
 - [x] **Crash diagnostics** — Login breadcrumbs plus a copyable last-crash alert on cold start
 - [x] **WebView DoH** — Upstream already has DoH `URLProtocol`; this fork also applies DoH to production WKWebViews via a CONNECT proxy on iOS 17+
+- [x] **URLSession DoH proxy (iOS 15)** — Forum API / Alamofire / URLSession images can use a custom DoH resolver through an app-local loopback gateway (ECH when the origin publishes an HTTPS RR; otherwise connect-by-IP with TLS 1.3). WKWebView stays on system DNS below iOS 17
 
 ## Tech Stack
 
@@ -85,7 +86,7 @@ Open the generated `dexo.xcodeproj`, select your development team, then build an
 dexo/
 ├── Core/
 │   ├── Auth/           # Auth flow, Keychain, RSA encryption
-│   ├── Networking/     # DoH URLProtocol
+│   ├── Networking/     # DoH URLProtocol + iOS 15 loopback gateway
 │   ├── Observable/     # ObservableViewController base class
 │   └── Settings/       # App preferences
 ├── Database/           # GRDB database manager & models

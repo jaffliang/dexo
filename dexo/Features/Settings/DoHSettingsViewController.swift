@@ -571,8 +571,8 @@ private final class DoHServerEditorViewController: BaseViewController {
     init(server: AppSettings.DoHServer?, onSave: @escaping (AppSettings.DoHServer) -> Void) {
         originalServer = server
         self.onSave = onSave
-        name = server?.name ?? ""
-        endpoint = server?.urlString ?? ""
+        name = server?.name ?? "Cloudflare"
+        endpoint = server?.urlString ?? "https://cloudflare-dns.com/dns-query"
         super.init(nibName: nil, bundle: nil)
     }
 

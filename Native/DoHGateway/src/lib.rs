@@ -1,0 +1,9 @@
+mod dns;
+mod doh;
+mod ffi;
+mod gateway;
+mod tls;
+
+pub use ffi::{
+    dexo_doh_gateway_is_running, dexo_doh_gateway_port, dexo_doh_gateway_start, dexo_doh_gateway_stop,
+};

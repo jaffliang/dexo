@@ -274,6 +274,7 @@ final class DiscourseAPI {
         let config = URLSessionConfiguration.af.default
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
+        DoHGatewayRuntime.prepare(config)
         return Session(
             configuration: config,
             interceptor: interceptor,

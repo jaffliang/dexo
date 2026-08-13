@@ -113,6 +113,7 @@ final class ForumListViewModel {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
+        DoHGatewayRuntime.prepare(configuration)
 
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }

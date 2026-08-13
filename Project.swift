@@ -9,9 +9,10 @@ let project = Project(
         defaultKnownRegions: ["en", "zh-Hans"],
         developmentRegion: "en"
     ),
-    packages: [
+        packages: [
         .local(path: "Packages/CookedHTML"),
         .local(path: "Packages/PushCrypto"),
+        .local(path: "Packages/DoHGatewayPolicy"),
     ],
     settings: .settings(
         base: [
@@ -65,6 +66,7 @@ let project = Project(
                 .external(name: "Lightbox"),
                 .package(product: "CookedHTML"),
                 .package(product: "PushCrypto"),
+                .package(product: "DoHGatewayPolicy"),
                 .target(name: "DexoNotificationService"),
                 .external(name: "DanmakuKit"),
                 .external(name: "Perception"),
@@ -79,14 +81,15 @@ let project = Project(
                     "CURRENT_PROJECT_VERSION": "2",
                     "DEXO_PUSH_RELAY_HOST": .string(pushRelayHost),
                     "GENERATE_INFOPLIST_FILE": "YES",
-                    "HEADER_SEARCH_PATHS": "$(inherited) $(SRCROOT)/dexo $(SRCROOT)/dexo/Core",
+                    "HEADER_SEARCH_PATHS": "$(inherited) $(SRCROOT)/dexo $(SRCROOT)/dexo/Core $(SRCROOT)/Native/DoHGateway/include",
+                    "LIBRARY_SEARCH_PATHS": "$(inherited) $(SRCROOT)/Native/DoHGateway/dist/$(PLATFORM_NAME)",
                     "INFOPLIST_KEY_CFBundleDisplayName": "Dexo",
                     "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.utilities",
                     "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
                     "INFOPLIST_KEY_UISupportedInterfaceOrientations": "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
                     "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown",
                     "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/Frameworks",
-                    "OTHER_LDFLAGS": "$(inherited) -ObjC",
+                    "OTHER_LDFLAGS": "$(inherited) -ObjC -lc++ -framework Security -framework SystemConfiguration -force_load $(SRCROOT)/Native/DoHGateway/dist/$(PLATFORM_NAME)/libdexo_doh_gateway.a",
                     "MARKETING_VERSION": "2.0",
                     "PRODUCT_NAME": "dexo",
                     "STRING_CATALOG_GENERATE_SYMBOLS": "YES",

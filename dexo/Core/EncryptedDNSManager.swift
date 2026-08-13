@@ -1,12 +1,16 @@
+import DoHGatewayPolicy
 import Foundation
 import Network
+import SDWebImage
 
 final class EncryptedDNSManager {
     static let shared = EncryptedDNSManager()
 
-    // The default privacy context is intentionally app-wide: enabling DoH
-    // applies to DNS resolution for every forum, not a host allowlist.
+    // PrivacyContext is encrypted DNS only (visible SNI). The loopback gateway
+    // is the FluxDO-style path for URLSession/Alamofire on iOS 15.
     private let privacyContext = NWParameters.PrivacyContext.default
+
+    private var didInstallImageDownloader = false
 
     private init() {}
 
@@ -14,6 +18,8 @@ final class EncryptedDNSManager {
     /// are created. Returns false only when an enabled endpoint is invalid.
     @discardableResult
     func applyCurrentSettings() -> Bool {
+        AppSettings.shared.seedDefaultDoHServersIfNeeded()
+        installOnSharedImageDownloader()
         let settings = AppSettings.shared
         guard !settings.dohEnabled || settings.defaultDoHServer != nil else {
             settings.dohEnabled = false
@@ -26,12 +32,13 @@ final class EncryptedDNSManager {
     }
 
     /// Updates encrypted name resolution for subsequent connections across
-    /// all forums and clears DNS/TLS state associated with the default context.
+    /// all forums and starts or stops the iOS 15 URLSession loopback gateway.
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         guard enabled else {
             privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
             privacyContext.flushCache()
+            DoHGatewayRuntime.shared.stop()
             if #available(iOS 17.0, *) {
                 WebViewDoHProxy.shared.stop()
             }
@@ -48,6 +55,13 @@ final class EncryptedDNSManager {
             WebViewDoHProxy.shared.stop()
         }
 
+        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURL.absoluteString) else {
+            privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
+            privacyContext.flushCache()
+            return false
+        }
+        installOnSharedImageDownloader()
+
         let resolver = NWParameters.PrivacyContext.ResolverConfiguration.https(
             serverURL,
             serverAddresses: []
@@ -57,25 +71,16 @@ final class EncryptedDNSManager {
         return true
     }
 
+    private func installOnSharedImageDownloader() {
+        guard !didInstallImageDownloader else { return }
+        didInstallImageDownloader = true
+        let downloader = SDWebImageDownloader.shared
+        let sessionConfiguration = downloader.config.sessionConfiguration
+        DoHGatewayRuntime.prepare(sessionConfiguration)
+        downloader.config.sessionConfiguration = sessionConfiguration
+    }
+
     static func normalizedServerURL(_ input: String) -> URL? {
-        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return nil }
-
-        if !value.contains("://") {
-            value = "https://" + value
-        }
-
-        guard let components = URLComponents(string: value),
-              components.scheme?.lowercased() == "https",
-              let host = components.host,
-              !host.isEmpty,
-              components.user == nil,
-              components.password == nil,
-              components.fragment == nil,
-              let url = components.url
-        else {
-            return nil
-        }
-        return url
+        DoHGatewayPolicy.normalizedDoHURL(input)
     }
 }

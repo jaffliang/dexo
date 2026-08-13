@@ -348,6 +348,31 @@ final class AppSettings {
         }
     }
 
+    /// Seeded on first launch so Settings can enable the proxy without typing a URL.
+    static let builtInDoHServers: [DoHServer] = [
+        DoHServer(
+            id: UUID(uuidString: "A1E0D0A0-1111-4D0A-A000-000000000001")!,
+            name: "Cloudflare",
+            urlString: "https://cloudflare-dns.com/dns-query"
+        ),
+        DoHServer(
+            id: UUID(uuidString: "A1E0D0A0-1111-4D0A-A000-000000000002")!,
+            name: "AliDNS",
+            urlString: "https://dns.alidns.com/dns-query"
+        ),
+        DoHServer(
+            id: UUID(uuidString: "A1E0D0A0-1111-4D0A-A000-000000000003")!,
+            name: "DNSPod",
+            urlString: "https://doh.pub/dns-query"
+        ),
+    ]
+
+    func seedDefaultDoHServersIfNeeded() {
+        guard defaults.data(forKey: "dohServers") == nil else { return }
+        dohServers = Self.builtInDoHServers
+        defaultDoHServerID = Self.builtInDoHServers.first?.id
+    }
+
     var dohEnabled: Bool {
         get { defaults.bool(forKey: "dohEnabled") }
         set { defaults.set(newValue, forKey: "dohEnabled") }
