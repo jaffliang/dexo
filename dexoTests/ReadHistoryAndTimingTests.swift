@@ -275,7 +275,14 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://www.idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://cdk.linux.do"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(url: URL(string: "https://cdk.linux.do/redeem")!))
         XCTAssertFalse(ForumPolicy.isLinuxDoFamily(baseURL: "https://example.com"))
+        XCTAssertEqual(ForumPolicy.linuxDoFamilyRegistrableHost(forHost: "cdk.linux.do"), "linux.do")
+        XCTAssertEqual(
+            ForumPolicy.defaultInAppBrowserURL(for: "https://linux.do"),
+            URL(string: "https://cdk.linux.do/")
+        )
 
         XCTAssertEqual(
             ForumPolicy.cloudflareInterstitialURL(for: "https://linux.do"),

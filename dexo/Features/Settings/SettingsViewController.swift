@@ -28,7 +28,7 @@ final class SettingsViewController: ObservableViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        reloadNetworkSection()
+        tableView.reloadData()
     }
 
     override func updateUI() {
@@ -48,6 +48,7 @@ final class SettingsViewController: ObservableViewController {
     private enum Section: Int, CaseIterable {
         case general
         case appearance
+        case session
         case storage
         case about
         #if DEBUG
@@ -58,11 +59,15 @@ final class SettingsViewController: ObservableViewController {
 
     /// Sections actually shown in the table, in order.
     private var visibleSections: [Section] {
+        var sections: [Section] = [.general, .appearance]
+        if sessionExportURL != nil {
+            sections.append(.session)
+        }
+        sections.append(contentsOf: [.network, .storage, .about])
         #if DEBUG
-        return [.general, .appearance, .network, .storage, .about, .debug]
-        #else
-        return [.general, .appearance, .network, .storage, .about]
+        sections.append(.debug)
         #endif
+        return sections
     }
 
     private enum AppearanceRow: Int, CaseIterable {
@@ -83,6 +88,15 @@ final class SettingsViewController: ObservableViewController {
 
     private enum NetworkRow {
         case dohSettings
+    }
+
+    private enum SessionRow: Int, CaseIterable {
+        case openWeb
+        case copyCookies
+    }
+
+    private var sessionExportURL: URL? {
+        WebCookieStore.shared.cookieEditorExportURLFromJar()
     }
 
     #if DEBUG
@@ -107,6 +121,7 @@ extension SettingsViewController: UITableViewDataSource {
         switch visibleSections[section] {
         case .general: return GeneralRow.allCases.count
         case .appearance: return AppearanceRow.allCases.count
+        case .session: return SessionRow.allCases.count
         case .storage: return 1
         case .about: return 1
         case .network: return networkRows().count
@@ -120,6 +135,7 @@ extension SettingsViewController: UITableViewDataSource {
         switch visibleSections[section] {
         case .general: return String(localized: "settings.section.general")
         case .appearance: return String(localized: "settings.section.appearance")
+        case .session: return String(localized: "settings.section.session")
         case .storage: return String(localized: "settings.section.storage")
         case .about: return String(localized: "settings.section.about")
         case .network: return String(localized: "settings.section.network")
@@ -161,6 +177,13 @@ extension SettingsViewController: UITableViewDataSource {
                 return makeAppIconCell(tableView, indexPath: indexPath)
             case .fontSize:
                 return makeFontSizeCell(tableView, indexPath: indexPath)
+            }
+        case .session:
+            switch SessionRow(rawValue: indexPath.row)! {
+            case .openWeb:
+                return makeOpenWebCell(tableView, indexPath: indexPath)
+            case .copyCookies:
+                return makeCopyCookiesCell(tableView, indexPath: indexPath)
             }
         case .storage:
             return makeStorageCell(tableView, indexPath: indexPath)
@@ -256,6 +279,26 @@ extension SettingsViewController: UITableViewDataSource {
         applyFonts(to: cell)
         cell.textLabel?.text = String(localized: "settings.boost_display")
         cell.detailTextLabel?.text = settings.boostDisplayMode.title
+        cell.accessoryType = .disclosureIndicator
+        return cell
+    }
+
+    private func makeOpenWebCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        applyFonts(to: cell)
+        cell.textLabel?.text = String(localized: "me.open_web")
+        cell.imageView?.image = UIImage(systemName: "globe")
+        cell.imageView?.tintColor = ThemeManager.shared.accentColor
+        cell.accessoryType = .disclosureIndicator
+        return cell
+    }
+
+    private func makeCopyCookiesCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        applyFonts(to: cell)
+        cell.textLabel?.text = String(localized: "me.copy_cookies")
+        cell.imageView?.image = UIImage(systemName: "doc.on.clipboard")
+        cell.imageView?.tintColor = ThemeManager.shared.accentColor
         cell.accessoryType = .disclosureIndicator
         return cell
     }
@@ -376,12 +419,23 @@ extension SettingsViewController: UITableViewDelegate {
                 let vc = FontSizeViewController()
                 navigationController?.pushViewController(vc, animated: true)
             }
+        case .session:
+            switch SessionRow(rawValue: indexPath.row)! {
+            case .openWeb:
+                let defaultURL = sessionExportURL.flatMap {
+                    ForumPolicy.defaultInAppBrowserURL(for: $0.absoluteString)
+                }
+                AuthenticatedWebViewController.promptAndPresent(from: self, defaultURL: defaultURL)
+            case .copyCookies:
+                guard let url = sessionExportURL else { break }
+                CookieExportPresenter.confirmAndCopy(from: self, url: url)
+            }
         case .storage:
             let vc = CacheViewController()
             navigationController?.pushViewController(vc, animated: true)
         case .about:
             if let url = URL(string: "https://github.com/Eilgnaw/dexo") {
-                UIApplication.shared.open(url)
+                ExternalLinkOpener.open(url, from: self)
             }
         case .network:
             let viewController = DoHSettingsViewController()

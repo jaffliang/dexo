@@ -1,5 +1,4 @@
 import CookedHTML
-import SafariServices
 import UIKit
 
 /// Bottom-sheet preview shown when the user taps the "↩︎ @username" badge on
@@ -127,13 +126,7 @@ extension ReplyPreviewViewController: PostCellDelegate {
     }
 
     private func openExternalURL(_ url: URL) {
-        let scheme = url.scheme?.lowercased()
-        if scheme == "http" || scheme == "https" {
-            let safari = SFSafariViewController(url: url)
-            present(safari, animated: true)
-        } else {
-            UIApplication.shared.open(url)
-        }
+        ExternalLinkOpener.open(url, from: self)
     }
 
     // Stubs — preview is read-only.

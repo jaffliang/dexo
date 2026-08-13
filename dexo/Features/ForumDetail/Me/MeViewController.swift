@@ -9,6 +9,8 @@ final class MeViewController: ObservableViewController {
         case localBlocklist
         case pushNotifications
         case challenge
+        case openWeb
+        case copyCookies
     }
 
     private let api: DiscourseAPI
@@ -242,6 +244,17 @@ final class MeViewController: ObservableViewController {
         ChallengeViewController.present(from: self, challengeURL: challengeURL)
     }
 
+    private func presentOpenWebPrompt() {
+        let defaultURL = ForumPolicy.defaultInAppBrowserURL(for: api.baseURL)
+            ?? URL(string: api.baseURL)
+        AuthenticatedWebViewController.promptAndPresent(from: self, defaultURL: defaultURL)
+    }
+
+    private func presentCopyCookies() {
+        guard let url = URL(string: api.baseURL) else { return }
+        CookieExportPresenter.confirmAndCopy(from: self, url: url)
+    }
+
     private func loginTapped() {
         authGate?.requireAuth { [weak self] in
             guard let self else { return }
@@ -305,16 +318,36 @@ extension MeViewController: UITableViewDataSource {
         return KeychainHelper.getUserApiKey(for: api.baseURL) == AuthManager.webAuthSentinel
     }
 
+    private var hasForumSessionCookies: Bool {
+        WebCookieStore.shared.hasDiscourseSessionCookies(for: api.baseURL)
+    }
+
+    private var showOpenWebRow: Bool {
+        api.isLinuxDoFamily && hasForumSessionCookies
+    }
+
+    private var showCopyCookiesRow: Bool {
+        api.isLinuxDoFamily && hasForumSessionCookies
+    }
+
     private var accountRows: [AccountRow] {
-        guard authGate?.isAuthenticated() == true else { return [] }
-        var rows: [AccountRow] = [.notifications, .bookmarks, .read]
-        if api.isLinuxDo {
-            rows.append(.following)
+        var rows: [AccountRow] = []
+        if authGate?.isAuthenticated() == true {
+            rows.append(contentsOf: [.notifications, .bookmarks, .read])
+            if api.isLinuxDo {
+                rows.append(.following)
+            }
+            rows.append(.localBlocklist)
+            rows.append(.pushNotifications)
+            if showChallengeRow {
+                rows.append(.challenge)
+            }
         }
-        rows.append(.localBlocklist)
-        rows.append(.pushNotifications)
-        if showChallengeRow {
-            rows.append(.challenge)
+        if showOpenWebRow {
+            rows.append(.openWeb)
+        }
+        if showCopyCookiesRow {
+            rows.append(.copyCookies)
         }
         return rows
     }
@@ -356,6 +389,12 @@ extension MeViewController: UITableViewDataSource {
             case .challenge:
                 content.image = UIImage(systemName: "shield")
                 content.text = String(localized: "me.challenge")
+            case .openWeb:
+                content.image = UIImage(systemName: "globe")
+                content.text = String(localized: "me.open_web")
+            case .copyCookies:
+                content.image = UIImage(systemName: "doc.on.clipboard")
+                content.text = String(localized: "me.copy_cookies")
             }
             content.imageProperties.tintColor = ThemeManager.shared.accentColor
             content.imageProperties.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
@@ -434,6 +473,10 @@ extension MeViewController: UITableViewDelegate {
                 navigationController?.pushViewController(viewController, animated: true)
             case .challenge:
                 presentChallenge()
+            case .openWeb:
+                presentOpenWebPrompt()
+            case .copyCookies:
+                presentCopyCookies()
             }
         case 1:
             let isLoggedIn = authGate?.isAuthenticated() ?? false
