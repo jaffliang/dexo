@@ -42,7 +42,14 @@ final class WebCookieStoreTests: XCTestCase {
             .value: "should-not-go-out-as-guest",
             .secure: "TRUE",
         ])!
-        WebCookieStore.shared.setCookies([clearance, botManagement, session])
+        let otherCf = HTTPCookie(properties: [
+            .domain: "guest-cf-test.example",
+            .path: "/",
+            .name: "cf_other",
+            .value: "must-not-go-out",
+            .secure: "TRUE",
+        ])!
+        WebCookieStore.shared.setCookies([clearance, botManagement, session, otherCf])
         WebCookieStore.shared.userAgent = "Mozilla/5.0 GuestChallengeTest"
         defer {
             WebCookieStore.shared.clearCookies(for: "https://guest-cf-test.example")
@@ -58,6 +65,7 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertTrue(cookie.contains("cf_clearance=guest-token"))
         XCTAssertTrue(cookie.contains("__cf_bm=bm-token"))
         XCTAssertFalse(cookie.contains("_t="))
+        XCTAssertFalse(cookie.contains("cf_other="))
         XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Mozilla/5.0 GuestChallengeTest")
         XCTAssertEqual(cookieHeaderCount(in: request), 1)
     }
@@ -123,11 +131,46 @@ final class WebCookieStoreTests: XCTestCase {
         XCTAssertEqual(cookieHeaderCount(in: request), 1)
     }
 
-    func testCloudflareCookieNameDetection() {
-        XCTAssertTrue(WebCookieStore.isCloudflareCookieName("cf_clearance"))
-        XCTAssertTrue(WebCookieStore.isCloudflareCookieName("__cf_bm"))
-        XCTAssertFalse(WebCookieStore.isCloudflareCookieName("_t"))
-        XCTAssertFalse(WebCookieStore.isCloudflareCookieName("_forum_session"))
+    func testGuestCloudflareCookieNameDetection() {
+        XCTAssertTrue(WebCookieStore.isGuestCloudflareCookieName("cf_clearance"))
+        XCTAssertTrue(WebCookieStore.isGuestCloudflareCookieName("__cf_bm"))
+        XCTAssertFalse(WebCookieStore.isGuestCloudflareCookieName("cf_other"))
+        XCTAssertFalse(WebCookieStore.isGuestCloudflareCookieName("_t"))
+        XCTAssertFalse(WebCookieStore.isGuestCloudflareCookieName("_forum_session"))
+    }
+
+    func testRemoveClearanceCookiesDropsOnlyCfClearance() {
+        let url = URL(string: "https://guest-cf-test.example/")!
+        let clearance = HTTPCookie(properties: [
+            .domain: "guest-cf-test.example",
+            .path: "/",
+            .name: "cf_clearance",
+            .value: "stale",
+            .secure: "TRUE",
+        ])!
+        let botManagement = HTTPCookie(properties: [
+            .domain: "guest-cf-test.example",
+            .path: "/",
+            .name: "__cf_bm",
+            .value: "keep",
+            .secure: "TRUE",
+        ])!
+        let session = HTTPCookie(properties: [
+            .domain: "guest-cf-test.example",
+            .path: "/",
+            .name: "_t",
+            .value: "keep-session",
+            .secure: "TRUE",
+        ])!
+        WebCookieStore.shared.setCookies([clearance, botManagement, session])
+        defer { WebCookieStore.shared.clearCookies(for: "https://guest-cf-test.example") }
+
+        WebCookieStore.shared.removeClearanceCookies(matching: url)
+
+        let remaining = Set(WebCookieStore.shared.cookies(for: url).map(\.name))
+        XCTAssertFalse(remaining.contains("cf_clearance"))
+        XCTAssertTrue(remaining.contains("__cf_bm"))
+        XCTAssertTrue(remaining.contains("_t"))
     }
 
     private func cookieHeaderCount(in request: URLRequest) -> Int {

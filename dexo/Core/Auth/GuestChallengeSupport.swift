@@ -26,22 +26,50 @@ struct GuestContentLoadFailure {
     }
 }
 
-enum GuestChallengeAutoPresent {
+/// Coalesces concurrent `challenge_required` failures into a single linux.do
+/// challenge sheet. Password-login still calls `presentAndWait` directly.
+enum GuestChallengePresenter {
     @MainActor
-    private static var didPresentThisSession = false
+    private static var isPresenting = false
+    @MainActor
+    private static var waiters: [CheckedContinuation<Bool, Never>] = []
+    @MainActor
+    private static var didAutoPresentThisSession = false
 
-    /// Returns true once per process for the home-feed auto-present path.
+    /// Presents one challenge sheet (or joins an in-flight one). Returns
+    /// whether `cf_clearance` is present after dismiss.
     @MainActor
-    static func consume() -> Bool {
-        guard !didPresentThisSession else { return false }
-        didPresentThisSession = true
+    static func presentAndWaitForClearance(
+        from presenter: UIViewController,
+        api: DiscourseAPI
+    ) async -> Bool {
+        guard api.isLinuxDo else { return false }
+        if isPresenting {
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+        isPresenting = true
+        await ChallengeViewController.presentAndWait(from: presenter)
+        let cleared = WebCookieStore.shared.hasValidClearance(for: api.baseURL)
+        let pending = waiters
+        waiters = []
+        isPresenting = false
+        pending.forEach { $0.resume(returning: cleared) }
+        return cleared
+    }
+
+    @MainActor
+    static func consumeHomeAutoPresent() -> Bool {
+        guard !didAutoPresentThisSession else { return false }
+        didAutoPresentThisSession = true
         return true
     }
 
     #if DEBUG
     @MainActor
     static func resetForTesting() {
-        didPresentThisSession = false
+        didAutoPresentThisSession = false
+        isPresenting = false
+        waiters = []
     }
     #endif
 }
@@ -59,15 +87,21 @@ enum GuestChallengeUI {
 }
 
 extension UIViewController {
-    /// Presents the linux.do Cloudflare challenge sheet, then retries.
+    /// Presents the linux.do Cloudflare challenge sheet (coalesced), then
+    /// retries only when a valid `cf_clearance` cookie is present.
     func presentGuestChallengeThenRetry(
         on api: DiscourseAPI,
         retry: @escaping () async -> Void
     ) {
         guard api.isLinuxDo else { return }
         Task { @MainActor in
-            await ChallengeViewController.presentAndWait(from: self)
-            await retry()
+            let cleared = await GuestChallengePresenter.presentAndWaitForClearance(
+                from: self,
+                api: api
+            )
+            if cleared {
+                await retry()
+            }
         }
     }
 
@@ -82,10 +116,14 @@ extension UIViewController {
         guard api.isLinuxDo,
               isChallengeRequired,
               view.window != nil,
-              presentedViewController == nil,
-              GuestChallengeAutoPresent.consume()
+              GuestChallengePresenter.consumeHomeAutoPresent()
         else { return }
-        await ChallengeViewController.presentAndWait(from: self)
-        await retry()
+        let cleared = await GuestChallengePresenter.presentAndWaitForClearance(
+            from: self,
+            api: api
+        )
+        if cleared {
+            await retry()
+        }
     }
 }

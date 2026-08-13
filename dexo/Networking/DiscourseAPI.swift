@@ -30,9 +30,10 @@ struct TopicTimingCircuitBreaker {
 func assessTopicTimingResponse(
     statusCode: Int?,
     data: Data?,
-    errorDescription: String?
+    errorDescription: String?,
+    headers: HTTPURLResponse? = nil
 ) -> TopicTimingResponseAssessment {
-    if isCloudflareChallengeResponse(data) {
+    if isCloudflareChallengeResponse(data, headers: headers) {
         return TopicTimingResponseAssessment(
             outcome: .cloudflareChallenge,
             statusCode: statusCode,
@@ -664,7 +665,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -689,7 +690,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -719,7 +720,7 @@ final class DiscourseAPI {
             encoding: URLEncoding.default,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -741,7 +742,7 @@ final class DiscourseAPI {
             method: route.method,
             headers: ["X-Requested-With": "XMLHttpRequest"]
         ).serializingData().response
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
         if let authError = authenticationFailureError(
@@ -901,7 +902,8 @@ final class DiscourseAPI {
         let assessment = assessTopicTimingResponse(
             statusCode: response.response?.statusCode,
             data: response.data,
-            errorDescription: response.error?.localizedDescription
+            errorDescription: response.error?.localizedDescription,
+            headers: response.response
         )
         if assessment.outcome == .success {
             _ = topicTimingsCircuitBreaker.record(.success)
@@ -1165,7 +1167,7 @@ final class DiscourseAPI {
             }
         }
 
-        if isCloudflareChallengeResponse(response.data) {
+        if isCloudflareChallengeResponse(response.data, headers: response.response) {
             throw DiscourseAPIError(messages: ["Cloudflare challenge required"], errorType: "challenge_required")
         }
 
@@ -1278,10 +1280,13 @@ struct DiscourseAPIError: LocalizedError {
     }
 }
 
-/// Detects Cloudflare's challenge interstitial in a response body. Cloudflare
-/// challenges may arrive with any status code (200, 403, 503), so the body is
-/// the only reliable signal.
-func isCloudflareChallengeResponse(_ data: Data?) -> Bool {
+/// Detects Cloudflare's challenge interstitial. JSON/text APIs often omit the
+/// HTML body markers; `cf-mitigated: challenge` plus `Server: cloudflare` is
+/// the header signal for those. HTML body scan remains the fallback.
+func isCloudflareChallengeResponse(_ data: Data?, headers: HTTPURLResponse? = nil) -> Bool {
+    if isCloudflareMitigatedChallenge(headers) {
+        return true
+    }
     guard let data, !data.isEmpty else { return false }
     // Cap the scan — Cloudflare pages are small HTML; real JSON can be huge.
     let prefix = data.prefix(65536)
@@ -1290,6 +1295,13 @@ func isCloudflareChallengeResponse(_ data: Data?) -> Bool {
         || snippet.contains("cf-browser-verification")
         || snippet.contains("cf-challenge-running")
         || snippet.contains("__cf_chl_")
+}
+
+func isCloudflareMitigatedChallenge(_ response: HTTPURLResponse?) -> Bool {
+    guard let response else { return false }
+    let mitigated = response.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
+    guard mitigated == "challenge" else { return false }
+    return response.value(forHTTPHeaderField: "Server")?.lowercased() == "cloudflare"
 }
 
 // MARK: - Auth Interceptor
@@ -1333,12 +1345,11 @@ private final class DiscourseAuthInterceptor: RequestInterceptor {
         var request = urlRequest
         let userApiKey = KeychainHelper.getUserApiKey(for: baseURL)
         // Attach WebCookieStore cookies + UA whether or not an API key exists.
-        // Guests have no User-Api-Key, so the previous sentinel-only path never
-        // sent `cf_clearance` or the challenge WKWebView User-Agent — passing
-        // `/challenge` could not unblock the home feed. Alamofire always sets a
-        // default User-Agent; applySessionHeaders overwrites it. Guest GETs
-        // omit `_t` / `_forum_session` so leftover session cookies cannot
-        // impersonate a login.
+        // Guests have no User-Api-Key: only `cf_clearance` and `__cf_bm` plus
+        // the challenge WKWebView User-Agent. Never send `_t` / `_forum_session`
+        // on that path (would fake a login). Alamofire always sets a default
+        // User-Agent; applySessionHeaders overwrites it with setValue so Cookie
+        // is never duplicated.
         WebCookieStore.shared.applySessionHeaders(to: &request, guestBrowsing: userApiKey == nil)
         if let userApiKey {
             if userApiKey == AuthManager.webAuthSentinel {

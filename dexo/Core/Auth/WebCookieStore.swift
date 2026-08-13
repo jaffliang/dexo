@@ -57,16 +57,16 @@ final class WebCookieStore {
         }
     }
 
-    func cookieHeader(for url: URL, excludingNames: Set<String> = []) -> String {
-        cookies(for: url)
-            .filter { !excludingNames.contains($0.name) }
-            .map { "\($0.name)=\($0.value)" }
-            .joined(separator: "; ")
+    func cookieHeader(for url: URL) -> String {
+        cookies(for: url).map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
-    /// Cloudflare clearance cookies that must ride along on guest GETs.
-    static func isCloudflareCookieName(_ name: String) -> Bool {
-        name.hasPrefix("cf_") || name.hasPrefix("__cf")
+    /// Cloudflare cookies that guest (no User-Api-Key) requests may send.
+    /// Never include `_t` / `_forum_session` — those would impersonate a login.
+    static let guestCloudflareCookieNames: Set<String> = ["cf_clearance", "__cf_bm"]
+
+    static func isGuestCloudflareCookieName(_ name: String) -> Bool {
+        guestCloudflareCookieNames.contains(name)
     }
 
     /// Attaches stored cookies and the challenge WKWebView User-Agent.
@@ -75,12 +75,11 @@ final class WebCookieStore {
     /// is replaced and a second `Cookie` header is never created.
     ///
     /// Pass `guestBrowsing: true` when there is no User-Api-Key: only
-    /// Cloudflare cookies (`cf_clearance`, `__cf_bm`, …) are sent so a leftover
-    /// `_t` cannot impersonate a logged-in session.
+    /// `cf_clearance` and `__cf_bm` are sent.
     func applySessionHeaders(to request: inout URLRequest, guestBrowsing: Bool = false) {
         guard let url = request.url else { return }
         let matching = cookies(for: url).filter { cookie in
-            !guestBrowsing || Self.isCloudflareCookieName(cookie.name)
+            !guestBrowsing || Self.isGuestCloudflareCookieName(cookie.name)
         }
         let header = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
         if !header.isEmpty {
@@ -88,6 +87,34 @@ final class WebCookieStore {
         }
         if let ua = userAgent, !ua.isEmpty {
             request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        }
+    }
+
+    /// Drops stale `cf_clearance` for this host so Cloudflare will show the
+    /// challenge widget instead of silently skipping it.
+    func removeClearanceCookies(matching url: URL) {
+        guard let host = url.host?.lowercased() else { return }
+        lock.lock()
+        jar = jar.filter { _, cookie in
+            !(cookie.name == "cf_clearance" && Self.cookieDomain(cookie.domain, matchesHost: host))
+        }
+        lock.unlock()
+        save()
+    }
+
+    @MainActor
+    func removeClearanceCookies(from dataStore: WKWebsiteDataStore, matching url: URL) async {
+        guard let host = url.host?.lowercased() else { return }
+        let store = dataStore.httpCookieStore
+        let all = await withCheckedContinuation { cont in
+            store.getAllCookies { cont.resume(returning: $0) }
+        }
+        for cookie in all where cookie.name == "cf_clearance"
+            && Self.cookieDomain(cookie.domain, matchesHost: host)
+        {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                store.delete(cookie) { cont.resume() }
+            }
         }
     }
 
