@@ -101,6 +101,21 @@ final class PasswordLoginErrorTests: XCTestCase {
 }
 
 final class PasswordLoginJavaScriptProtocolTests: XCTestCase {
+    func testLinuxDoKeepsBothHCaptchaCreateEndpointsInOrder() throws {
+        XCTAssertEqual(
+            PasswordLoginConfig.linuxDo.hCaptchaCreateEndpoints,
+            [
+                "/captcha/hcaptcha/create.json",
+                "/hcaptcha/create.json",
+            ]
+        )
+        let encoded = try XCTUnwrap(
+            String(data: JSONEncoder().encode(PasswordLoginConfig.linuxDo.hCaptchaCreateEndpoints), encoding: .utf8)
+        )
+        let js = PasswordLoginWebSession.loginJavaScript(config: .linuxDo)
+        XCTAssertTrue(js.contains(encoded), "login JS must embed both create endpoints in order: \(encoded)")
+    }
+
     func testLoginJavaScriptUsesCredentialsIncludeWithoutManualCookieHeaders() {
         let js = PasswordLoginWebSession.loginJavaScript(config: .linuxDo)
         XCTAssertTrue(js.contains("credentials: 'include'"))
