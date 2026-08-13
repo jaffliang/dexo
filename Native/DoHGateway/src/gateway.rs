@@ -59,17 +59,35 @@ impl Gateway {
     }
 
     async fn handle(&self, mut client: TcpStream) -> Result<(), String> {
-        let request = read_http_request(&mut client).await?;
-        let upstream = upstream_target(&request)?;
+        let request = match read_http_request(&mut client).await {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = write_error(&mut client, 502, &error).await;
+                return Err(error);
+            }
+        };
+        let upstream = match upstream_target(&request) {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                write_error(&mut client, 502, &error).await?;
+                return Ok(());
+            }
+        };
         if upstream.host.eq_ignore_ascii_case(self.resolver.host()) {
             return write_error(&mut client, 502, "refusing to proxy the DoH resolver").await;
         }
 
-        let lookup = self
-            .resolver
-            .lookup(&upstream.host)
-            .await
-            .map_err(|error| format!("DoH lookup {}: {error}", upstream.host))?;
+        let lookup = match self.resolver.lookup(&upstream.host).await {
+            Ok(lookup) => lookup,
+            Err(error) => {
+                return write_error(
+                    &mut client,
+                    502,
+                    &format!("DoH lookup {}: {error}", upstream.host),
+                )
+                .await;
+            }
+        };
         let addresses = ordered_addresses(&lookup);
         if addresses.is_empty() {
             return write_error(&mut client, 502, "DoH returned no addresses").await;
@@ -117,24 +135,23 @@ impl Gateway {
         if let Some(config) = ech_config {
             let stream = connect_tcp(addr).await?;
             match self.tls.connect(&upstream.host, stream, Some(config)).await {
-                Ok((tls, true)) => {
+                Ok((tls, used_ech)) => {
                     let bytes = proxy_http(tls, request, upstream).await?;
-                    return Ok((bytes, true));
-                }
-                Ok((tls, false)) => {
-                    let bytes = proxy_http(tls, request, upstream).await?;
-                    return Ok((bytes, false));
+                    return Ok((bytes, used_ech));
                 }
                 Err(error) => {
                     eprintln!(
-                        "[DoHGateway] ECH connect {addr} failed ({error}); retrying TLS 1.3 with visible SNI"
+                        "[DoHGateway] ECH handshake {addr} failed ({error}); falling back to visible SNI on a new TCP connection"
                     );
                 }
             }
         }
 
         let stream = connect_tcp(addr).await?;
-        let (tls, _) = self.tls.connect(&upstream.host, stream, None).await?;
+        let tls = self
+            .tls
+            .connect_visible_sni(&upstream.host, stream)
+            .await?;
         let bytes = proxy_http(tls, request, upstream).await?;
         Ok((bytes, false))
     }
@@ -169,7 +186,7 @@ where
     if response.is_empty() {
         return Err("empty upstream response".into());
     }
-    Ok(response)
+    http::process_upstream_response(&response)
 }
 
 #[derive(Debug)]
@@ -256,6 +273,7 @@ fn encode_upstream_request(request: &ParsedRequest, upstream: &Upstream) -> Vec<
     for (name, value) in &request.headers {
         if is_hop_by_hop(name)
             || name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("accept-encoding")
             || name.eq_ignore_ascii_case(SKIP_HEADER)
             || name.to_ascii_lowercase().starts_with("x-dexo-gateway-")
         {
@@ -326,17 +344,48 @@ fn lookup_summary(lookup: &crate::dns::Lookup) -> String {
     )
 }
 
-async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Result<(), String> {
-    let body = message.as_bytes();
-    let response = format!(
-        "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+fn gateway_error_response(status: u16, message: &str) -> Vec<u8> {
+    let reason = if message.starts_with("DoH gateway: ") {
+        message.to_string()
+    } else {
+        format!("DoH gateway: {message}")
+    };
+    let body = format!(r#"{{"errors":["{}"]}}"#, json_escape(&reason));
+    let phrase = match status {
+        502 => "Bad Gateway",
+        400 => "Bad Request",
+        _ => "Error",
+    };
+    let mut out = format!(
+        "HTTP/1.1 {status} {phrase}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
-    );
+    )
+    .into_bytes();
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Result<(), String> {
     stream
-        .write_all(response.as_bytes())
+        .write_all(&gateway_error_response(status, message))
         .await
         .map_err(|error| error.to_string())?;
-    stream.write_all(body).await.map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -473,5 +522,37 @@ mod tests {
         assert!(encoded.contains("Accept: application/json"));
         assert!(!encoded.to_ascii_lowercase().contains(HOST_HEADER));
         assert!(encoded.contains("Connection: close"));
+    }
+
+    #[test]
+    fn strips_accept_encoding_from_upstream_request() {
+        let parsed = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Accept-Encoding", "gzip, deflate"),
+            ("Accept", "application/json"),
+        ]);
+        let upstream = Upstream {
+            host: "linux.do".into(),
+            port: 443,
+        };
+        let encoded = String::from_utf8(encode_upstream_request(&parsed, &upstream)).unwrap();
+        assert!(encoded.contains("Accept: application/json"));
+        assert!(!encoded.to_ascii_lowercase().contains("accept-encoding"));
+    }
+
+    #[test]
+    fn gateway_failures_are_complete_json_502() {
+        let response = String::from_utf8(gateway_error_response(502, "Cloudflare HTML")).unwrap();
+        assert!(response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
+        assert!(response.contains(r#"{"errors":["DoH gateway: Cloudflare HTML"]}"#));
+        assert!(!response.contains("text/plain"));
+    }
+
+    #[test]
+    fn gateway_error_json_escapes_quotes() {
+        let response = String::from_utf8(gateway_error_response(502, r#"TLS handshake "linux.do""#)).unwrap();
+        assert!(response.contains(r#"{"errors":["DoH gateway: TLS handshake \"linux.do\""]}"#));
     }
 }

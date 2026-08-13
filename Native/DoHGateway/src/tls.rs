@@ -1,11 +1,16 @@
 //! Outbound TLS 1.3. When the `ech` feature is on and the origin published an
 //! HTTPS/SVCB ECH config, SNI is encrypted. Otherwise the client hello uses a
 //! normal (visible) server_name and still dials the DoH-resolved IP.
+//!
+//! Cipher suites and key-exchange groups are ordered like Chrome/Safari so
+//! Cloudflare is less likely to serve a "Just a moment" HTML interstitial.
+//! ALPN stays `http/1.1` only.
 
 use std::sync::Arc;
 
+use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{CipherSuite, ClientConfig, NamedGroup, RootCertStore, SupportedCipherSuite};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
@@ -30,28 +35,43 @@ impl GatewayTls {
         self.plain.clone()
     }
 
+    /// Visible-SNI handshake on a fresh TCP stream. Uses the same Chrome-like
+    /// cipher provider as ECH.
+    pub async fn connect_visible_sni(
+        &self,
+        host: &str,
+        stream: TcpStream,
+    ) -> Result<TlsStream<TcpStream>, String> {
+        let server_name = ServerName::try_from(host.to_string())
+            .map_err(|_| format!("invalid TLS hostname {host}"))?;
+        let connector = TlsConnector::from(self.plain.clone());
+        connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|error| format!("TLS handshake {host}: {error}"))
+    }
+
     pub async fn connect(
         &self,
         host: &str,
         stream: TcpStream,
         ech_config: Option<&[u8]>,
     ) -> Result<(TlsStream<TcpStream>, bool), String> {
-        let server_name = ServerName::try_from(host.to_string())
-            .map_err(|_| format!("invalid TLS hostname {host}"))?;
-
         if let Some(config_list) = ech_config {
             match ech_client_config(config_list) {
                 Ok(config) => {
+                    let server_name = ServerName::try_from(host.to_string())
+                        .map_err(|_| format!("invalid TLS hostname {host}"))?;
                     let connector = TlsConnector::from(config);
-                    match connector.connect(server_name.clone(), stream).await {
+                    match connector.connect(server_name, stream).await {
                         Ok(tls) => {
                             eprintln!("[DoHGateway] ECH handshake ok for {host}");
                             return Ok((tls, true));
                         }
                         Err(error) => {
-                            eprintln!(
-                                "[DoHGateway] ECH handshake failed for {host}, falling back to visible SNI: {error}"
-                            );
+                            // Stream is burned; the caller must open a new TCP
+                            // connection and call `connect_visible_sni`.
+                            eprintln!("[DoHGateway] ECH handshake failed for {host}: {error}");
                             return Err(error.to_string());
                         }
                     }
@@ -62,31 +82,20 @@ impl GatewayTls {
             }
         }
 
-        let connector = TlsConnector::from(self.plain.clone());
-        let tls = connector
-            .connect(server_name, stream)
-            .await
-            .map_err(|error| format!("TLS handshake {host}: {error}"))?;
+        let tls = self.connect_visible_sni(host, stream).await?;
         Ok((tls, false))
     }
 }
 
 fn install_provider() {
-    #[cfg(feature = "ech")]
-    {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    }
-    #[cfg(not(feature = "ech"))]
-    {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
+    let _ = browser_like_provider().install_default();
 }
 
 fn client_config(
     roots: RootCertStore,
     ech_mode: Option<rustls::client::EchMode>,
 ) -> Result<ClientConfig, String> {
-    let builder = rustls::ClientConfig::builder_with_provider(active_provider().into());
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(browser_like_provider()));
 
     #[cfg(feature = "ech")]
     if let Some(mode) = ech_mode {
@@ -127,7 +136,17 @@ fn ech_client_config(_config_list: &[u8]) -> Result<Arc<ClientConfig>, String> {
     Err("ECH support was not compiled".into())
 }
 
-fn active_provider() -> rustls::crypto::CryptoProvider {
+/// rustls defaults put ChaCha ahead of AES-GCM (and aws-lc may offer ML-KEM).
+/// Reorder to a Chrome/Safari-like ClientHello: AES-128-GCM, AES-256-GCM,
+/// ChaCha20, then TLS 1.2 ECDHE AES-GCM / ChaCha; X25519, P-256, P-384.
+fn browser_like_provider() -> CryptoProvider {
+    let mut provider = stock_provider();
+    provider.cipher_suites = chrome_like_cipher_suites(provider.cipher_suites);
+    provider.kx_groups = chrome_like_kx_groups(provider.kx_groups);
+    provider
+}
+
+fn stock_provider() -> CryptoProvider {
     #[cfg(feature = "ech")]
     {
         rustls::crypto::aws_lc_rs::default_provider()
@@ -135,5 +154,75 @@ fn active_provider() -> rustls::crypto::CryptoProvider {
     #[cfg(not(feature = "ech"))]
     {
         rustls::crypto::ring::default_provider()
+    }
+}
+
+fn chrome_like_cipher_suites(suites: Vec<SupportedCipherSuite>) -> Vec<SupportedCipherSuite> {
+    let mut suites = suites;
+    suites.sort_by_key(|suite| cipher_priority(suite.suite()));
+    suites
+}
+
+fn cipher_priority(suite: CipherSuite) -> u32 {
+    match suite {
+        CipherSuite::TLS13_AES_128_GCM_SHA256 => 0,
+        CipherSuite::TLS13_AES_256_GCM_SHA384 => 1,
+        CipherSuite::TLS13_CHACHA20_POLY1305_SHA256 => 2,
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 => 10,
+        CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 => 11,
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 => 12,
+        CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 => 13,
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => 14,
+        CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => 15,
+        _ => 100,
+    }
+}
+
+fn chrome_like_kx_groups(
+    groups: Vec<&'static dyn SupportedKxGroup>,
+) -> Vec<&'static dyn SupportedKxGroup> {
+    let preferred = [NamedGroup::X25519, NamedGroup::secp256r1, NamedGroup::secp384r1];
+    let ordered: Vec<_> = preferred
+        .into_iter()
+        .filter_map(|want| groups.iter().copied().find(|group| group.name() == want))
+        .collect();
+    if ordered.is_empty() {
+        groups
+    } else {
+        ordered
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_like_ciphers_put_aes128_gcm_first() {
+        let provider = browser_like_provider();
+        assert!(provider.cipher_suites.len() >= 3);
+        assert_eq!(
+            provider.cipher_suites[0].suite(),
+            CipherSuite::TLS13_AES_128_GCM_SHA256
+        );
+        assert_eq!(
+            provider.cipher_suites[1].suite(),
+            CipherSuite::TLS13_AES_256_GCM_SHA384
+        );
+        assert_eq!(
+            provider.cipher_suites[2].suite(),
+            CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+        );
+    }
+
+    #[test]
+    fn browser_like_kx_is_x25519_then_nist() {
+        let provider = browser_like_provider();
+        let names: Vec<NamedGroup> = provider.kx_groups.iter().map(|group| group.name()).collect();
+        assert_eq!(names.first().copied(), Some(NamedGroup::X25519));
+        assert!(!names.iter().any(|name| matches!(
+            name,
+            NamedGroup::X25519MLKEM768 | NamedGroup::secp256r1MLKEM768 | NamedGroup::MLKEM768
+        )));
     }
 }

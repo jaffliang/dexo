@@ -1,6 +1,8 @@
 //! HTTP/1.1 response framing so the gateway can stop reading when the body
 //! is complete instead of waiting for the origin to close the TLS stream.
 
+use std::io::Read;
+
 use tokio::io::AsyncReadExt;
 
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -85,6 +87,38 @@ pub fn complete_response_len(buffer: &[u8], connection_closed: bool) -> Result<O
 }
 
 pub fn status_and_decoded_body(message: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    let decoded = decode_response(message)?;
+    Ok((decoded.status, decoded.body))
+}
+
+/// Unchunk, gunzip/inflate if needed, and refuse Cloudflare HTML so the iOS
+/// client never JSON-decodes an interstitial or compressed bytes.
+pub fn process_upstream_response(message: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = decode_response(message)?;
+    let encoding = header_value(&decoded.headers, "content-encoding")
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"));
+    if let Some(encoding) = encoding {
+        decoded.body = decode_content_encoding(encoding, decoded.body)?;
+        if let Some(reason) = html_challenge_reason(&decoded.headers, &decoded.body) {
+            return Err(reason.into());
+        }
+        return Ok(encode_identity_response(&decoded));
+    }
+    if let Some(reason) = html_challenge_reason(&decoded.headers, &decoded.body) {
+        return Err(reason.into());
+    }
+    Ok(message.to_vec())
+}
+
+struct DecodedResponse {
+    status: u16,
+    reason: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+fn decode_response(message: &[u8]) -> Result<DecodedResponse, String> {
     let header_end = find_delim(message).ok_or_else(|| "HTTP response missing header delimiter".to_string())?;
     let headers_end = header_end + DELIM.len();
     let head = parse_head(&message[..header_end])?;
@@ -93,40 +127,168 @@ pub fn status_and_decoded_body(message: &[u8]) -> Result<(u16, Vec<u8>), String>
     } else {
         &[]
     };
+    let body = decode_body(&head, raw_body)?;
+    Ok(DecodedResponse {
+        status: head.status,
+        reason: head.reason,
+        headers: head.headers,
+        body,
+    })
+}
+
+fn decode_body(head: &Head, raw_body: &[u8]) -> Result<Vec<u8>, String> {
     if head.no_body {
-        return Ok((head.status, Vec::new()));
+        return Ok(Vec::new());
     }
-    let body = if head.chunked {
-        decode_chunked(raw_body)?
+    if head.chunked {
+        decode_chunked(raw_body)
     } else if let Some(len) = head.content_length {
         if raw_body.len() < len {
             return Err("truncated HTTP body".into());
         }
-        raw_body[..len].to_vec()
+        Ok(raw_body[..len].to_vec())
     } else {
-        raw_body.to_vec()
+        Ok(raw_body.to_vec())
+    }
+}
+
+fn decode_content_encoding(encoding: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    if body.is_empty() {
+        return Ok(body);
+    }
+    let first = encoding
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match first.as_str() {
+        "" | "identity" => Ok(body),
+        "gzip" | "x-gzip" => gunzip(&body),
+        "deflate" => inflate(&body),
+        other => Err(format!("unsupported Content-Encoding: {other}")),
+    }
+}
+
+fn gunzip(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = flate2::read::GzDecoder::new(body);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|error| format!("gzip decompress failed: {error}"))?;
+    if out.len() > MAX_BODY_BYTES {
+        return Err("gzip body too large".into());
+    }
+    Ok(out)
+}
+
+fn inflate(body: &[u8]) -> Result<Vec<u8>, String> {
+    let zlib = {
+        let mut decoder = flate2::read::ZlibDecoder::new(body);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).ok().map(|_| out)
     };
-    Ok((head.status, body))
+    if let Some(out) = zlib {
+        if out.len() > MAX_BODY_BYTES {
+            return Err("deflate body too large".into());
+        }
+        return Ok(out);
+    }
+    let mut decoder = flate2::read::DeflateDecoder::new(body);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|error| format!("deflate decompress failed: {error}"))?;
+    if out.len() > MAX_BODY_BYTES {
+        return Err("deflate body too large".into());
+    }
+    Ok(out)
+}
+
+fn html_challenge_reason(headers: &[(String, String)], body: &[u8]) -> Option<&'static str> {
+    if header_value(headers, "cf-mitigated").is_some() {
+        return Some("Cloudflare HTML");
+    }
+    if header_value(headers, "content-type")
+        .map(|value| value.to_ascii_lowercase().contains("html"))
+        .unwrap_or(false)
+    {
+        return Some("Cloudflare HTML");
+    }
+    let start = body
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(body.len());
+    if body.get(start) == Some(&b'<') {
+        return Some("Cloudflare HTML");
+    }
+    None
+}
+
+fn encode_identity_response(decoded: &DecodedResponse) -> Vec<u8> {
+    let reason = if decoded.reason.is_empty() {
+        "OK"
+    } else {
+        decoded.reason.as_str()
+    };
+    let mut out = format!("HTTP/1.1 {} {reason}\r\n", decoded.status).into_bytes();
+    for (name, value) in &decoded.headers {
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("content-encoding")
+            || name.eq_ignore_ascii_case("connection")
+        {
+            continue;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(
+        format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            decoded.body.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(&decoded.body);
+    out
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|(key, value)| {
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
 }
 
 struct Head {
     status: u16,
+    reason: String,
     chunked: bool,
     content_length: Option<usize>,
     no_body: bool,
+    headers: Vec<(String, String)>,
 }
 
 fn parse_head(header_bytes: &[u8]) -> Result<Head, String> {
     let header_text = std::str::from_utf8(header_bytes).map_err(|_| "HTTP headers not utf8")?;
     let mut lines = header_text.split("\r\n");
     let status_line = lines.next().unwrap_or("");
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
+    let mut parts = status_line.splitn(3, ' ');
+    let _version = parts.next();
+    let status = parts
+        .next()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+    let reason = parts.next().unwrap_or("").to_string();
     let mut chunked = false;
     let mut content_length = None;
+    let mut headers = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -145,13 +307,16 @@ fn parse_head(header_bytes: &[u8]) -> Result<Head, String> {
                     .map_err(|_| "invalid content-length".to_string())?,
             );
         }
+        headers.push((name.to_string(), value.to_string()));
     }
     let no_body = status / 100 == 1 || status == 204 || status == 304;
     Ok(Head {
         status,
+        reason,
         chunked,
         content_length,
         no_body,
+        headers,
     })
 }
 
@@ -258,5 +423,39 @@ mod tests {
         let response = b"HTTP/1.1 200 OK\r\n\r\nxyz";
         assert_eq!(complete_response_len(response, false).unwrap(), None);
         assert_eq!(complete_response_len(response, true).unwrap(), Some(response.len()));
+    }
+
+    #[test]
+    fn html_body_is_not_forwarded() {
+        let response = b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: 19\r\n\r\n<!DOCTYPE html>nope";
+        let error = process_upstream_response(response).unwrap_err();
+        assert_eq!(error, "Cloudflare HTML");
+    }
+
+    #[test]
+    fn cf_mitigated_header_is_not_forwarded() {
+        let response = b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 2\r\n\r\n{}";
+        let error = process_upstream_response(response).unwrap_err();
+        assert_eq!(error, "Cloudflare HTML");
+    }
+
+    #[test]
+    fn gzip_json_is_decompressed_to_identity() {
+        use std::io::Write;
+        let json = br#"{"topic_list":[]}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(json).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&compressed);
+        let rewritten = process_upstream_response(&response).unwrap();
+        let text = String::from_utf8(rewritten).unwrap();
+        assert!(text.contains("Content-Length: 17"));
+        assert!(!text.to_ascii_lowercase().contains("content-encoding"));
+        assert!(text.ends_with(r#"{"topic_list":[]}"#));
     }
 }
