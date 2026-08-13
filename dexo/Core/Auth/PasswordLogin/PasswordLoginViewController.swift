@@ -389,9 +389,6 @@ final class PasswordLoginViewController: BaseViewController {
                 captchaToken: token,
                 secondFactor: nil
             )
-        } catch PasswordLoginError.canceled {
-            await dismissCaptchaIfNeeded()
-            throw error
         } catch {
             await dismissCaptchaIfNeeded()
             throw error
@@ -405,17 +402,12 @@ final class PasswordLoginViewController: BaseViewController {
         captchaToken: String?,
         secondFactor: String?
     ) async throws {
-        let result: PasswordLoginBridgeResult
-        do {
-            result = try await session.runLogin(
-                identifier: identifier,
-                password: password,
-                hCaptchaToken: captchaToken,
-                secondFactorToken: secondFactor
-            )
-        } catch {
-            throw error
-        }
+        let result = try await session.runLogin(
+            identifier: identifier,
+            password: password,
+            hCaptchaToken: captchaToken,
+            secondFactorToken: secondFactor
+        )
 
         switch result.phase {
         case "csrf" where result.status == 403 && !didRetryCF:

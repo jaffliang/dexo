@@ -282,9 +282,10 @@ final class PasswordLoginWebSession {
                     }
                 }
             }
-        } catch PasswordLoginError.canceled {
-            throw error
         } catch {
+            if case PasswordLoginError.canceled = error {
+                throw error
+            }
             PasswordLoginCrashBreadcrumb.recordError(error)
             throw error
         }
