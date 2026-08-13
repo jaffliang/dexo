@@ -3007,6 +3007,22 @@
         }
       }
     },
+    "password_login.captcha.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Security Check"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安全验证"
+          }
+        }
+      }
+    },
     "password_login.captcha_hint" : {
       "localizations" : {
         "en" : {
@@ -3243,6 +3259,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "密码"
+          }
+        }
+      }
+    },
+    "password_login.remember" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remember me"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "记住账号和密码"
           }
         }
       }

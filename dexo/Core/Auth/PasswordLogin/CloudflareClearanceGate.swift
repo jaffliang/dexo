@@ -20,7 +20,8 @@ enum CloudflareClearanceGate {
         }
         await ChallengeViewController.presentAndWait(
             from: presenter,
-            challengeURL: challengeURL
+            challengeURL: challengeURL,
+            prefersFullScreen: true
         )
         // ChallengeViewController syncs cookies on navigation/dismiss; allow flush.
         try? await Task.sleep(nanoseconds: 1_200_000_000)
