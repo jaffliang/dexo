@@ -9,40 +9,44 @@ enum ExternalLinkDestination: Equatable {
     case missingSession
 }
 
-/// Topic link taps vs explicit “打开网页” URLs must not share one policy:
-/// Safari cannot see App `_t`, so a linux.do OAuth site opened from the prompt
-/// has to stay in the authenticated WKWebView.
+/// HTTP(S) links use the authenticated WKWebView whenever the jar has `_t`,
+/// including post taps to third-party linux.do OAuth sites. Safari cannot see
+/// App cookies. Custom schemes still go to the system.
 enum ExternalLinkOpener {
     /// Live call site: `VirtualizedTopicDetailViewController.handleLink`.
-    /// Family hosts use the authenticated WKWebView when the jar has `_t`.
-    /// Non-family HTTP(S) stays in Safari.
     static func open(_ url: URL, from presenter: UIViewController) {
         present(destinationForLinkTap(url), url: url, from: presenter)
     }
 
-    /// User-typed URL from Me / Settings “打开网页”. Any HTTP(S) host uses the
-    /// authenticated WKWebView when the jar has `_t` (so `api.coee.ccwu.cc`
-    /// can OAuth to `connect.linux.do`). Never Safari.
+    /// User-typed URL from Me / Settings “打开网页”.
     static func openTypedURL(_ url: URL, from presenter: UIViewController) {
         present(destinationForTypedURL(url), url: url, from: presenter)
     }
 
     static func destinationForLinkTap(_ url: URL) -> ExternalLinkDestination {
-        let scheme = url.scheme?.lowercased()
-        guard scheme == "http" || scheme == "https" else { return .systemOpen }
-        if ForumPolicy.isLinuxDoFamily(url: url) {
-            return WebCookieStore.shared.hasAuthTokenCookie(for: url)
-                ? .authenticatedWebView
-                : .missingSession
-        }
-        return .safari
+        destinationForAuthenticatedHTTP(url, missingFamilySession: true)
     }
 
     static func destinationForTypedURL(_ url: URL) -> ExternalLinkDestination {
+        destinationForAuthenticatedHTTP(url, missingFamilySession: false)
+    }
+
+    /// - Parameter missingFamilySession: Topic taps to linux.do family without
+    ///   `_t` show the missing-session alert. Typed URLs always alert without `_t`.
+    ///   Non-family taps without `_t` still use Safari.
+    private static func destinationForAuthenticatedHTTP(
+        _ url: URL,
+        missingFamilySession: Bool
+    ) -> ExternalLinkDestination {
         let scheme = url.scheme?.lowercased()
         guard scheme == "http" || scheme == "https" else { return .systemOpen }
-        guard WebCookieStore.shared.hasAnyAuthTokenCookie() else { return .missingSession }
-        return .authenticatedWebView
+        if WebCookieStore.shared.hasAnyAuthTokenCookie() {
+            return .authenticatedWebView
+        }
+        if !missingFamilySession || ForumPolicy.isLinuxDoFamily(url: url) {
+            return .missingSession
+        }
+        return .safari
     }
 
     private static func present(
