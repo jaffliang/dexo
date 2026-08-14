@@ -131,6 +131,7 @@ final class DoHGatewayPolicyTests: XCTestCase {
         redirected.setValue("linux.do", forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader)
         redirected.setValue("443", forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader)
         redirected.setValue("https", forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader)
+        redirected.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader)
         redirected.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let next = DoHGatewayPolicy.requestForOuterRedirect(redirected)
@@ -139,6 +140,7 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader))
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader))
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader))
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader))
         XCTAssertEqual(next.value(forHTTPHeaderField: "Accept"), "application/json")
         XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(next, configuration: active))
     }

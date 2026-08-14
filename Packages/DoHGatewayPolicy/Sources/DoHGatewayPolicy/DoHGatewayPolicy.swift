@@ -16,6 +16,9 @@ public enum DoHGatewayPolicy {
     public static let upstreamHostHeader = "X-Dexo-Gateway-Host"
     public static let upstreamPortHeader = "X-Dexo-Gateway-Port"
     public static let upstreamSchemeHeader = "X-Dexo-Gateway-Scheme"
+    /// Challenge WKWebView only. Tells the loopback gateway to pass through
+    /// Cloudflare interstitial HTML instead of turning it into a JSON 502.
+    public static let passHTMLHeader = "X-Dexo-Pass-HTML"
 
     /// Inner `URLProtocol` relay must return 3xx to the client. Following
     /// `Location: https://…` on a session with `protocolClasses = []` does
@@ -189,6 +192,7 @@ public enum DoHGatewayPolicy {
         request.setValue(nil, forHTTPHeaderField: upstreamHostHeader)
         request.setValue(nil, forHTTPHeaderField: upstreamPortHeader)
         request.setValue(nil, forHTTPHeaderField: upstreamSchemeHeader)
+        request.setValue(nil, forHTTPHeaderField: passHTMLHeader)
         return request
     }
 

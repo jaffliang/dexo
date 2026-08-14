@@ -22,6 +22,7 @@ const HOST_HEADER: &str = "x-dexo-gateway-host";
 const PORT_HEADER: &str = "x-dexo-gateway-port";
 const SCHEME_HEADER: &str = "x-dexo-gateway-scheme";
 const SKIP_HEADER: &str = "x-dexo-gateway-skip";
+const PASS_HTML_HEADER: &str = "x-dexo-pass-html";
 
 #[derive(Clone)]
 pub struct Gateway {
@@ -391,7 +392,13 @@ async fn proxy_http2(
     )
     .await
     .map_err(|_| "upstream read timeout".to_string())??;
-    http::process_upstream_parts(status, &headers, body, alpn)
+    http::process_upstream_parts(
+        status,
+        &headers,
+        body,
+        alpn,
+        should_pass_html_challenge(request),
+    )
 }
 
 async fn proxy_http11(
@@ -414,7 +421,7 @@ async fn proxy_http11(
     if response.is_empty() {
         return Err("empty upstream response".into());
     }
-    http::process_upstream_response(&response, alpn)
+    http::process_upstream_response(&response, alpn, should_pass_html_challenge(request))
 }
 
 #[derive(Debug)]
@@ -519,6 +526,7 @@ fn forwarded_request_headers(request: &ParsedRequest) -> Vec<(String, String)> {
         if is_hop_by_hop(name)
             || name.eq_ignore_ascii_case("host")
             || name.eq_ignore_ascii_case(SKIP_HEADER)
+            || name.eq_ignore_ascii_case(PASS_HTML_HEADER)
             || name.to_ascii_lowercase().starts_with("x-dexo-gateway-")
         {
             continue;
@@ -562,6 +570,18 @@ fn sanitize_accept_encoding(value: &str) -> Option<String> {
     } else {
         Some(parts.join(", "))
     }
+}
+
+fn should_pass_html_challenge(request: &ParsedRequest) -> bool {
+    if header_value(&request.headers, PASS_HTML_HEADER)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    header_value(&request.headers, "accept")
+        .map(|accept| accept.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
 }
 
 fn host_header(upstream: &Upstream) -> String {
@@ -925,6 +945,34 @@ mod tests {
         assert!(headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("accept-encoding") && value == "gzip, deflate, br"
         }));
+    }
+
+    #[test]
+    fn browser_accept_or_pass_html_header_allows_interstitial() {
+        assert!(should_pass_html_challenge(&request(vec![(
+            "Accept",
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
+        )])));
+        assert!(should_pass_html_challenge(&request(vec![(PASS_HTML_HEADER, "1")])));
+        assert!(!should_pass_html_challenge(&request(vec![("Accept", "application/json")])));
+        assert!(!should_pass_html_challenge(&request(vec![])));
+    }
+
+    #[test]
+    fn pass_html_header_is_not_forwarded_upstream() {
+        let parsed = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Accept", "text/html"),
+            (PASS_HTML_HEADER, "1"),
+        ]);
+        let headers = forwarded_request_headers(&parsed);
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(PASS_HTML_HEADER)));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("accept") && value.contains("text/html")));
     }
 
     #[test]

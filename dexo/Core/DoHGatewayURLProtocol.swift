@@ -37,6 +37,11 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
             return
         }
         rewritten.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.skipHeader)
+        if request.value(forHTTPHeaderField: "Accept")?
+            .localizedCaseInsensitiveContains("text/html") == true
+        {
+            rewritten.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader)
+        }
         #if DEBUG
         if let original = request.url?.absoluteString, let proxied = rewritten.url?.absoluteString {
             print("[DoHGateway] \(request.httpMethod ?? "GET") \(original) -> \(proxied)")
