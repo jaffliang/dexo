@@ -7,31 +7,13 @@ struct TopicTimingResponseAssessment: Equatable {
     let errorSummary: String?
 }
 
-/// FluxDO-aligned retry policy for `/topics/timings`. 403 is not retryable
-/// and must never disable the Settings toggle.
-enum ReadTimingAlgorithm {
-    static let retryableStatusCodes: Set<Int> = [405, 429, 500, 501, 502, 503, 504]
-    static let retryDelays: [TimeInterval] = [5, 10, 20, 40]
-
-    static func retryDelay(afterFailureCount failureCount: Int) -> TimeInterval {
-        let index = min(max(failureCount, 0), retryDelays.count - 1)
-        return retryDelays[index]
-    }
-
-    static func isRetryable(statusCode: Int?, outcome: TopicTimingOutcome) -> Bool {
-        guard outcome != .cloudflareChallenge, let statusCode else { return false }
-        return retryableStatusCodes.contains(statusCode)
-    }
-}
-
 struct TopicTimingCircuitBreaker {
     static let maximumFailures = 3
 
     private(set) var failureCount = 0
     private var blockedUntil: Date?
 
-    /// Never permanently open. Transient 405/429/5xx only delay the next send.
-    var isTripped: Bool { false }
+    var isTripped: Bool { failureCount >= Self.maximumFailures }
 
     var isBlocked: Bool {
         guard let blockedUntil else { return false }
@@ -49,13 +31,28 @@ struct TopicTimingCircuitBreaker {
             blockedUntil = nil
             return false
         }
-        guard ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) else {
-            return false
-        }
-        let delay = ReadTimingAlgorithm.retryDelay(afterFailureCount: failureCount)
         failureCount += 1
-        blockedUntil = now.addingTimeInterval(delay)
-        return false
+        if ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) {
+            let delay = ReadTimingAlgorithm.retryDelay(afterFailureCount: failureCount - 1)
+            blockedUntil = now.addingTimeInterval(delay)
+        }
+        return isTripped
+    }
+
+    /// Records a real send outcome. After `maximumFailures` consecutive
+    /// failures, turns off only the switch for `baseURL`'s site.
+    @discardableResult
+    mutating func recordReportingOutcome(
+        _ outcome: TopicTimingOutcome,
+        statusCode: Int? = nil,
+        baseURL: String,
+        now: Date = Date()
+    ) -> Bool {
+        let tripped = record(outcome, statusCode: statusCode, now: now)
+        if tripped {
+            ForumPolicy.disableReadTimingsReporting(baseURL: baseURL)
+        }
+        return tripped
     }
 
     mutating func reset() {
@@ -901,12 +898,10 @@ final class DiscourseAPI {
     ///   - topicTime: total time spent on the topic in milliseconds
     ///   - timings: per-post duration map (postNumber → milliseconds visible)
     func postTopicTimings(topicId: Int, topicTime: Int, timings: [Int: Int]) async throws {
-        if ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: baseURL) {
-            let generation = AppSettings.shared.linuxDoReadTimingsActivationGeneration
-            if lastTopicTimingsActivationGeneration != generation {
-                topicTimingsCircuitBreaker.reset()
-                lastTopicTimingsActivationGeneration = generation
-            }
+        let generation = ForumPolicy.readTimingsActivationGeneration(baseURL: baseURL)
+        if lastTopicTimingsActivationGeneration != generation {
+            topicTimingsCircuitBreaker.reset()
+            lastTopicTimingsActivationGeneration = generation
         }
         let reportingEnabled = ForumPolicy.tracksReadTimings(baseURL: baseURL)
         if reportingEnabled, lastTopicTimingsReportingEnabled == false {
@@ -914,26 +909,33 @@ final class DiscourseAPI {
         }
         lastTopicTimingsReportingEnabled = reportingEnabled
         guard reportingEnabled else { return }
+        guard AuthManager.shared.isAuthenticated(for: baseURL) else { return }
         if topicTimingsCircuitBreaker.isBlocked {
-            debugLog("[DiscourseAPI] timings: waiting \(Int(topicTimingsCircuitBreaker.remainingBackoff))s before retry")
-            return
+            let delay = topicTimingsCircuitBreaker.remainingBackoff
+            debugLog("[DiscourseAPI] timings: waiting \(Int(delay))s before retry")
+            throw TopicTimingBackoffError(delay: delay)
         }
         guard !timings.isEmpty else { return }
         let route = DiscourseRouter.topicTimings
         let url = baseURL + route.path
-        let stringKeyed = Dictionary(uniqueKeysWithValues: timings.map { (String($0.key), $0.value) })
-        let parameters: Parameters = [
-            "topic_id": topicId,
-            "topic_time": topicTime,
-            "timings": stringKeyed,
-        ]
-        // Discourse (idcflare especially) returns 403 without X-Requested-With.
-        // X-SILENCE-LOGGER / Discourse-Background match the web client's timings POST.
-        let headers: HTTPHeaders = [
-            "X-Requested-With": "XMLHttpRequest",
-            "X-SILENCE-LOGGER": "true",
-            "Discourse-Background": "true",
-        ]
+        let parameters = TopicTimingsFormEncoder.parameters(
+            topicId: topicId,
+            topicTime: topicTime,
+            timings: timings
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "X-SILENCE-LOGGER", value: "true")
+        headers.add(name: "Discourse-Background", value: "true")
+        // Discourse rejects state-changing requests without `X-Requested-With:
+        // XMLHttpRequest` (CSRF/origin guard) → 403. fluxidc's Dio client
+        // sends this on every request; other DiscourseAPI POSTs already do.
+        headers.add(name: "X-Requested-With", value: "XMLHttpRequest")
+        // fluxidc request_header_interceptor: Origin + Referer of the forum.
+        headers.add(name: "Origin", value: baseURL)
+        headers.add(name: "Referer", value: baseURL + "/")
+        if AuthManager.shared.isAuthenticated(for: baseURL) {
+            headers.add(name: "Discourse-Present", value: "true")
+        }
         debugLog("[DiscourseAPI] POST /topics/timings topic=\(topicId) topic_time=\(topicTime) posts=\(timings.count)")
         let attemptedAt = Date()
         let requestStart = Date()
@@ -941,7 +943,7 @@ final class DiscourseAPI {
             url,
             method: route.method,
             parameters: parameters,
-            encoding: URLEncoding.default,
+            encoding: URLEncoding.httpBody,
             headers: headers
         ).serializingData().response
         let requestDuration = Int(Date().timeIntervalSince(requestStart) * 1000)
@@ -958,7 +960,11 @@ final class DiscourseAPI {
             headers: response.response
         )
         if assessment.outcome == .success {
-            _ = topicTimingsCircuitBreaker.record(.success, statusCode: assessment.statusCode)
+            _ = topicTimingsCircuitBreaker.recordReportingOutcome(
+                .success,
+                statusCode: assessment.statusCode,
+                baseURL: baseURL
+            )
             debugLog("[DiscourseAPI] timings: ok (\(assessment.statusCode ?? 0))")
             persistTopicTimingReport(
                 topicId: topicId,
@@ -972,14 +978,16 @@ final class DiscourseAPI {
                 trippedBreaker: false,
                 errorSummary: nil
             )
+            postReadTimingsStatus(.succeeded)
         } else {
-            _ = topicTimingsCircuitBreaker.record(
+            let tripped = topicTimingsCircuitBreaker.recordReportingOutcome(
                 assessment.outcome,
-                statusCode: assessment.statusCode
+                statusCode: assessment.statusCode,
+                baseURL: baseURL
             )
             let summary = assessment.errorSummary ?? "Network request failed"
             let delay = topicTimingsCircuitBreaker.remainingBackoff
-            debugLog("[DiscourseAPI] timings: FAILED status=\(assessment.statusCode ?? 0) (consec=\(topicTimingsCircuitBreaker.failureCount)) retry_in=\(Int(delay))s")
+            debugLog("[DiscourseAPI] timings: FAILED status=\(assessment.statusCode ?? 0) (consec=\(topicTimingsCircuitBreaker.failureCount)) retry_in=\(Int(delay))s tripped=\(tripped)")
             persistTopicTimingReport(
                 topicId: topicId,
                 topicTime: topicTime,
@@ -989,14 +997,31 @@ final class DiscourseAPI {
                 statusCode: assessment.statusCode,
                 outcome: assessment.outcome,
                 consecutiveFailureCount: topicTimingsCircuitBreaker.failureCount,
-                trippedBreaker: false,
+                trippedBreaker: tripped,
                 errorSummary: summary
             )
-            throw DiscourseAPIError(
-                messages: [summary],
-                errorType: assessment.outcome == .cloudflareChallenge ? "challenge_required" : nil
-            )
+            if tripped {
+                postReadTimingsStatus(.autoDisabled)
+                NotificationCenter.default.post(
+                    name: .linuxDoReadTimingsAutoDisabled,
+                    object: self,
+                    userInfo: ["baseURL": baseURL]
+                )
+            } else if delay > 0 {
+                postReadTimingsStatus(.retrying(delay: delay, summary: summary))
+            } else {
+                postReadTimingsStatus(.failed(summary: summary))
+            }
+            throw TopicTimingRequestError(assessment: assessment)
         }
+    }
+
+    private func postReadTimingsStatus(_ status: ReadTimingUserStatus) {
+        NotificationCenter.default.post(
+            name: .readTimingsStatusDidChange,
+            object: self,
+            userInfo: ["status": status]
+        )
     }
 
     private var topicTimingsCircuitBreaker = TopicTimingCircuitBreaker()
@@ -1015,9 +1040,14 @@ final class DiscourseAPI {
         trippedBreaker: Bool,
         errorSummary: String?
     ) {
-        guard let forumID else { return }
+        let forums = (try? DatabaseManager.shared.fetchAllForums()) ?? []
+        let resolvedForumId = TopicTimingReportPersistence.resolvedForumId(
+            preferred: forumID,
+            baseURL: baseURL,
+            forums: forums
+        )
         var report = TopicTimingReport(
-            forumId: forumID,
+            forumId: resolvedForumId,
             baseURL: baseURL,
             accountName: AuthManager.shared.username(for: baseURL),
             topicId: topicId,
@@ -1268,9 +1298,28 @@ final class DiscourseAPI {
     }
 }
 
+struct TopicTimingBackoffError: Error, Equatable {
+    let delay: TimeInterval
+}
+
+struct TopicTimingRequestError: Error, Equatable {
+    let assessment: TopicTimingResponseAssessment
+
+    var isRetryable: Bool {
+        ReadTimingAlgorithm.isRetryable(statusCode: assessment.statusCode, outcome: assessment.outcome)
+    }
+
+    var isCloudflareChallenge: Bool {
+        assessment.outcome == .cloudflareChallenge
+    }
+}
+
 extension Notification.Name {
     static let linuxDoReadTimingsAutoDisabled = Notification.Name(
         "linuxDoReadTimingsAutoDisabled"
+    )
+    static let readTimingsStatusDidChange = Notification.Name(
+        "readTimingsStatusDidChange"
     )
 }
 

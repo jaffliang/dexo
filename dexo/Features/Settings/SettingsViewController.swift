@@ -40,6 +40,8 @@ final class SettingsViewController: ObservableViewController {
         _ = settings.dohEnabled
         _ = settings.dohServers
         _ = settings.defaultDoHServerID
+        _ = settings.linuxDoReadTimingsEnabled
+        _ = settings.idcflareReadTimingsEnabled
         tableView.reloadData()
     }
 
@@ -83,11 +85,14 @@ final class SettingsViewController: ObservableViewController {
     }
 
     private func networkRows() -> [NetworkRow] {
-        [.dohSettings]
+        [.dohSettings, .linuxDoReadTimings, .idcflareReadTimings, .timingReports]
     }
 
     private enum NetworkRow {
         case dohSettings
+        case linuxDoReadTimings
+        case idcflareReadTimings
+        case timingReports
     }
 
     private enum SessionRow: Int, CaseIterable {
@@ -104,8 +109,6 @@ final class SettingsViewController: ObservableViewController {
         case renderPreview
         case webViewProxyTest
         case urlSessionProxyTest
-        case linuxDoReadTimings
-        case timingReports
     }
     #endif
 }
@@ -150,10 +153,13 @@ extension SettingsViewController: UITableViewDataSource {
         case .about:
             return String(localized: "settings.about.footer")
         case .network:
-            return String(localized: "settings.doh.root.footer")
+            return [
+                String(localized: "settings.doh.root.footer"),
+                String(localized: "settings.read_timings.footer"),
+            ].joined(separator: "\n\n")
         #if DEBUG
         case .debug:
-            return String(localized: "settings.read_timings.footer")
+            return nil
         #endif
         default:
             return nil
@@ -196,14 +202,16 @@ extension SettingsViewController: UITableViewDataSource {
             switch row {
             case .dohSettings:
                 return makeDoHSettingsCell(tableView, indexPath: indexPath)
+            case .linuxDoReadTimings:
+                return makeLinuxDoReadTimingsCell(tableView, indexPath: indexPath)
+            case .idcflareReadTimings:
+                return makeIdcflareReadTimingsCell(tableView, indexPath: indexPath)
+            case .timingReports:
+                return makeTimingReportsCell(tableView, indexPath: indexPath)
         }
         #if DEBUG
         case .debug:
             switch DebugRow(rawValue: indexPath.row)! {
-            case .linuxDoReadTimings:
-                return makeLinuxDoReadTimingsCell(tableView, indexPath: indexPath)
-            case .timingReports:
-                return makeTimingReportsCell(tableView, indexPath: indexPath)
             case .renderPreview:
                 return makeRenderPreviewCell(tableView, indexPath: indexPath)
             case .webViewProxyTest:
@@ -335,6 +343,18 @@ extension SettingsViewController: UITableViewDataSource {
         return cell
     }
 
+    private func makeIdcflareReadTimingsCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        applyFonts(to: cell)
+        cell.textLabel?.text = String(localized: "settings.read_timings.idcflare")
+        cell.selectionStyle = .none
+        let toggle = UISwitch()
+        toggle.isOn = settings.idcflareReadTimingsEnabled
+        toggle.addTarget(self, action: #selector(idcflareReadTimingsChanged(_:)), for: .valueChanged)
+        cell.accessoryView = toggle
+        return cell
+    }
+
     private func makeTimingReportsCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         applyFonts(to: cell)
@@ -449,15 +469,17 @@ extension SettingsViewController: UITableViewDelegate {
                 ExternalLinkOpener.open(url, from: self)
             }
         case .network:
-            let viewController = DoHSettingsViewController()
-            navigationController?.pushViewController(viewController, animated: true)
-        #if DEBUG
-        case .debug:
-            switch DebugRow(rawValue: indexPath.row)! {
-            case .linuxDoReadTimings:
+            switch networkRows()[indexPath.row] {
+            case .dohSettings:
+                navigationController?.pushViewController(DoHSettingsViewController(), animated: true)
+            case .linuxDoReadTimings, .idcflareReadTimings:
                 break
             case .timingReports:
                 navigationController?.pushViewController(TopicTimingReportsViewController(), animated: true)
+            }
+        #if DEBUG
+        case .debug:
+            switch DebugRow(rawValue: indexPath.row)! {
             case .renderPreview:
                 showRenderPreviewInput()
             case .webViewProxyTest:
@@ -481,6 +503,10 @@ extension SettingsViewController {
 
     @objc private func linuxDoReadTimingsChanged(_ sender: UISwitch) {
         settings.linuxDoReadTimingsEnabled = sender.isOn
+    }
+
+    @objc private func idcflareReadTimingsChanged(_ sender: UISwitch) {
+        settings.idcflareReadTimingsEnabled = sender.isOn
     }
 
     private func reloadAppearanceSection() {

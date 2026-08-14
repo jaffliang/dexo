@@ -85,9 +85,13 @@ final class RepliesViewController: BaseViewController {
 
     private let readTracker = TopicReadTracker()
     private var readFlushTimer: Timer?
+    private var readTickTimer: Timer?
     private var pendingReadFlush: DispatchWorkItem?
+    private var isFlushingReadTimings = false
+    private var hasPendingReadFlush = false
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
+    private static let readTickInterval: TimeInterval = 1
     private let hidesLikeButton: Bool
 
     init(api: DiscourseAPI, postId: Int, topicId: Int, validReactions: [String] = []) {
@@ -142,12 +146,14 @@ final class RepliesViewController: BaseViewController {
         super.viewWillAppear(animated)
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
     @objc private func appDidEnterBackground() {
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         readTracker.pause()
     }
@@ -155,6 +161,7 @@ final class RepliesViewController: BaseViewController {
     @objc private func appWillEnterForeground() {
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
@@ -174,11 +181,17 @@ final class RepliesViewController: BaseViewController {
     }
 
     private func resumeReadTracking() {
+        readTracker.unfreeze()
         readTracker.startSession()
+        syncVisibleReadTracking()
+    }
+
+    private func syncVisibleReadTracking() {
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   case .post(let postId) = item,
                   let post = replies.first(where: { $0.id == postId }) else { continue }
+            if post.read { readTracker.markServerRead(post.postNumber) }
             readTracker.recordVisible(postNumber: post.postNumber)
         }
     }
@@ -197,19 +210,83 @@ final class RepliesViewController: BaseViewController {
         readFlushTimer = nil
     }
 
+    private func startReadTickTimer() {
+        stopReadTickTimer()
+        let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.syncVisibleReadTracking()
+            if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
+                self.flushReadTimings()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readTickTimer = timer
+    }
+
+    private func stopReadTickTimer() {
+        readTickTimer?.invalidate()
+        readTickTimer = nil
+    }
+
     private func flushReadTimings() {
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
+              AuthManager.shared.isAuthenticated(for: api.baseURL)
+        else { return }
+        if isFlushingReadTimings {
+            hasPendingReadFlush = true
+            return
+        }
         let snap = readTracker.snapshotDelta()
         debugLog("[ReadTracker] replies topic=\(topicId) flush topic_time=\(snap.topicTime) posts=\(snap.timings.count)")
         guard !snap.timings.isEmpty else { return }
+        isFlushingReadTimings = true
         let topicId = self.topicId
         let api = self.api
-        Task.detached {
-            try? await api.postTopicTimings(
-                topicId: topicId,
-                topicTime: snap.topicTime,
-                timings: snap.timings
-            )
+        Task { [weak self] in
+            do {
+                try await api.postTopicTimings(
+                    topicId: topicId,
+                    topicTime: snap.topicTime,
+                    timings: snap.timings
+                )
+                await MainActor.run {
+                    self?.readTracker.commitSend()
+                    self?.finishReadFlush()
+                }
+            } catch is TopicTimingBackoffError {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isCloudflareChallenge {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isRetryable {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as DiscourseAPIError where error.isChallengeRequired {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch {
+                await MainActor.run {
+                    self?.readTracker.dropInFlight()
+                    self?.finishReadFlush()
+                }
+            }
         }
+    }
+
+    private func finishReadFlush() {
+        isFlushingReadTimings = false
+        guard hasPendingReadFlush else { return }
+        hasPendingReadFlush = false
+        flushReadTimings()
     }
 
     // MARK: - Data Loading
@@ -265,6 +342,7 @@ extension RepliesViewController: UITableViewDelegate {
         guard let item = dataSource.itemIdentifier(for: indexPath),
               case .post(let postId) = item,
               let post = replies.first(where: { $0.id == postId }) else { return }
+        if post.read { readTracker.markServerRead(post.postNumber) }
         readTracker.recordVisible(postNumber: post.postNumber)
     }
 
@@ -273,6 +351,10 @@ extension RepliesViewController: UITableViewDelegate {
               case .post(let postId) = item,
               let post = replies.first(where: { $0.id == postId }) else { return }
         readTracker.recordHidden(postNumber: post.postNumber)
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        readTracker.markScrolled()
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
@@ -293,6 +375,7 @@ extension RepliesViewController {
         super.viewWillDisappear(animated)
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         readTracker.pause()
     }

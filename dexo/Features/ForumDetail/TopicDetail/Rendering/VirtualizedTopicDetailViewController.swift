@@ -101,9 +101,14 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private let jumpScrubMoveThreshold: CGFloat = 8
     private let readTracker = TopicReadTracker()
     private var readFlushTimer: Timer?
+    private var readTickTimer: Timer?
     private var pendingReadFlush: DispatchWorkItem?
+    private var isFlushingReadTimings = false
+    private var hasPendingReadFlush = false
+    private var readTimingsBannerHideWork: DispatchWorkItem?
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
+    private static let readTickInterval: TimeInterval = 1
     private let imageZoomTransition = ImageZoomTransitionDelegate()
     private lazy var boostDanmaku = BoostDanmakuOverlay(hostView: view)
     private let floatingReplyButton = FloatingReplyButton()
@@ -124,6 +129,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         view.showsVerticalScrollIndicator = false
         view.delegate = self
         view.prefetchDataSource = self
+        view.clipsToBounds = false
         view.register(VirtualTopicTitleCell.self, forCellWithReuseIdentifier: VirtualTopicTitleCell.reuseIdentifier)
         view.register(VirtualPostHeaderCell.self, forCellWithReuseIdentifier: VirtualPostHeaderCell.reuseIdentifier)
         view.register(VirtualPostBlockCell.self, forCellWithReuseIdentifier: VirtualPostBlockCell.reuseIdentifier)
@@ -169,7 +175,8 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
                 floor: floor,
                 baseURL: self.baseURL,
                 isOP: post.username == self.viewModel.opUsername,
-                treeState: self.viewModel.isTreeMode ? self.viewModel.postTreeLineStates[postId] : nil
+                treeState: self.viewModel.isTreeMode ? self.viewModel.postTreeLineStates[postId] : nil,
+                showsUnreadDot: self.showsUnreadTimingDot(for: post)
             )
             cell.onAvatar = { [weak self] in self?.postCell(didTapAvatarForUsername: $0) }
             cell.onReplyReference = { [weak self] in self?.postCell(didTapReplyReferenceForPost: post) }
@@ -397,6 +404,21 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     private let challengeButton = GuestChallengeUI.makePassButton()
 
+    private let readTimingsBanner: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = FontManager.shared.font(size: 13, weight: .medium)
+        label.textColor = .white
+        label.textAlignment = .center
+        label.numberOfLines = 2
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        label.layer.cornerRadius = 8
+        label.clipsToBounds = true
+        label.alpha = 0
+        label.isHidden = true
+        return label
+    }()
+
     private let topLoadingBar: UIView = {
         let bar = UIView()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -477,6 +499,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         view.addSubview(topLoadingBar)
         view.addSubview(jumpOverlay)
         view.addSubview(bottomBar)
+        view.addSubview(readTimingsBanner)
         view.addSubview(floatingReplyButton)
         floatingReplyButton.addTarget(self, action: #selector(floatingReplyTapped), for: .touchUpInside)
         challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
@@ -502,6 +525,11 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
             jumpOverlay.bottomAnchor.constraint(equalTo: collectionView.bottomAnchor),
             bottomBar.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            readTimingsBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            readTimingsBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            readTimingsBanner.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            readTimingsBanner.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
+            readTimingsBanner.heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
         ])
         collectionView.contentInset.bottom = 68
         updateTreeModeControls()
@@ -510,6 +538,12 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         NotificationCenter.default.addObserver(self, selector: #selector(renderEnvironmentChanged), name: FontManager.fontDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(readTimingsStatusDidChange(_:)),
+            name: .readTimingsStatusDidChange,
+            object: api
+        )
         Task { await initialLoad() }
         Task {
             await api.loadOrFetchEmojiMap()
@@ -521,6 +555,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         super.viewWillAppear(animated)
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
@@ -528,6 +563,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         super.viewWillDisappear(animated)
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         readTracker.pause()
         cancelAllImagePrefetches()
@@ -690,24 +726,84 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     @objc private func appDidEnterBackground() {
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
-        readTracker.pause()
+        readTracker.setHasFocus(false)
     }
 
     @objc private func appWillEnterForeground() {
+        readTracker.setHasFocus(true)
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
     private func resumeReadTracking() {
+        readTracker.unfreeze()
         readTracker.startSession()
-        for indexPath in collectionView.indexPathsForVisibleItems {
-            guard let item = dataSource.itemIdentifier(for: indexPath),
-                  let postId = postIdByItem[item],
+        syncVisibleReadTracking()
+        refreshVisibleUnreadDots(animated: false)
+    }
+
+    /// Reconcile from cells and layout frames that are actually on screen.
+    /// Custom timeline layout + snapshot/height commits can fire extra
+    /// `didEndDisplaying` without a matching `willDisplay`, and
+    /// `indexPathsForVisibleItems` can be stale — do not trust those alone.
+    private func syncVisibleReadTracking() {
+        for postId in onScreenPostIDs() {
+            guard let post = viewModel.postsById[postId] else { continue }
+            prepareReadTracking(for: post)
+            readTracker.recordVisible(postNumber: post.postNumber)
+        }
+    }
+
+    private func onScreenPostIDs() -> Set<Int> {
+        var postIds = Set<Int>()
+        for cell in collectionView.visibleCells {
+            if let header = cell as? VirtualPostHeaderCell, let postId = header.trackedPostId {
+                postIds.insert(postId)
+            } else if let provider = cell as? TopicPostIDProviding, provider.renderedPostId != 0 {
+                postIds.insert(provider.renderedPostId)
+            }
+        }
+        let visibleRect = collectionView.bounds
+        for attributes in collectionView.collectionViewLayout.layoutAttributesForElements(in: visibleRect) ?? [] {
+            if let item = dataSource.itemIdentifier(for: attributes.indexPath),
+               let postId = postIdByItem[item]
+            {
+                postIds.insert(postId)
+            }
+        }
+        return postIds
+    }
+
+    private func prepareReadTracking(for post: DiscourseTopicDetail.Post) {
+        if post.read {
+            readTracker.markServerRead(post.postNumber)
+        }
+    }
+
+    private func showsUnreadTimingDot(for post: DiscourseTopicDetail.Post) -> Bool {
+        guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL),
+              !post.deletedPostPlaceholder
+        else { return false }
+        prepareReadTracking(for: post)
+        return readTracker.showsUnreadDot(
+            postNumber: post.postNumber,
+            serverRead: post.read,
+            lastReadPostNumber: viewModel.topic?.lastReadPostNumber
+        )
+    }
+
+    private func refreshVisibleUnreadDots(animated: Bool) {
+        guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL) else { return }
+        for cell in collectionView.visibleCells {
+            guard let header = cell as? VirtualPostHeaderCell,
+                  let postId = header.trackedPostId,
                   let post = viewModel.postsById[postId]
             else { continue }
-            readTracker.recordVisible(postNumber: post.postNumber)
+            header.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
         }
     }
 
@@ -723,6 +819,24 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private func stopReadFlushTimer() {
         readFlushTimer?.invalidate()
         readFlushTimer = nil
+    }
+
+    private func startReadTickTimer() {
+        stopReadTickTimer()
+        let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.syncVisibleReadTracking()
+            if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
+                self.flushReadTimings()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readTickTimer = timer
+    }
+
+    private func stopReadTickTimer() {
+        readTickTimer?.invalidate()
+        readTickTimer = nil
     }
 
     private func scheduleDebouncedReadFlush() {
@@ -741,17 +855,100 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     }
 
     private func flushReadTimings() {
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
+              AuthManager.shared.isAuthenticated(for: api.baseURL)
+        else { return }
+        if isFlushingReadTimings {
+            hasPendingReadFlush = true
+            return
+        }
         let snapshot = readTracker.snapshotDelta()
         guard !snapshot.timings.isEmpty else { return }
+        isFlushingReadTimings = true
         let api = api
         let topicId = topicId
-        Task.detached {
-            try? await api.postTopicTimings(
-                topicId: topicId,
-                topicTime: snapshot.topicTime,
-                timings: snapshot.timings
-            )
+        Task { [weak self] in
+            do {
+                try await api.postTopicTimings(
+                    topicId: topicId,
+                    topicTime: snapshot.topicTime,
+                    timings: snapshot.timings
+                )
+                await MainActor.run {
+                    self?.readTracker.commitSend()
+                    self?.refreshVisibleUnreadDots(animated: true)
+                    self?.finishReadFlush()
+                }
+            } catch is TopicTimingBackoffError {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isCloudflareChallenge {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isRetryable {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as DiscourseAPIError where error.isChallengeRequired {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch {
+                await MainActor.run {
+                    self?.readTracker.dropInFlight()
+                    self?.finishReadFlush()
+                }
+            }
         }
+    }
+
+    private func finishReadFlush() {
+        isFlushingReadTimings = false
+        guard hasPendingReadFlush else { return }
+        hasPendingReadFlush = false
+        flushReadTimings()
+    }
+
+    @objc private func readTimingsStatusDidChange(_ notification: Notification) {
+        guard let status = notification.userInfo?["status"] as? ReadTimingUserStatus else { return }
+        switch status {
+        case .succeeded:
+            showReadTimingsBanner(String(localized: "read_timings.banner.succeeded"))
+        case .failed(let summary):
+            showReadTimingsBanner(String(localized: "read_timings.banner.failed \(summary)"))
+        case .retrying(let delay, _):
+            showReadTimingsBanner(String(localized: "read_timings.banner.retrying \(Int(delay))"))
+        case .autoDisabled:
+            showReadTimingsBanner(String(localized: "read_timings.banner.auto_disabled"))
+            refreshVisibleUnreadDots(animated: true)
+        case .idle:
+            break
+        }
+    }
+
+    private func showReadTimingsBanner(_ text: String) {
+        readTimingsBannerHideWork?.cancel()
+        readTimingsBanner.text = "  \(text)  "
+        readTimingsBanner.isHidden = false
+        UIView.animate(withDuration: 0.2) {
+            self.readTimingsBanner.alpha = 1
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.25, animations: {
+                self.readTimingsBanner.alpha = 0
+            }, completion: { _ in
+                self.readTimingsBanner.isHidden = true
+            })
+        }
+        readTimingsBannerHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     private func handleLoadErrorIfNeeded() {
@@ -1616,6 +1813,7 @@ extension VirtualizedTopicDetailViewController: RenderUnitSizeInvalidating {
         {
             collectionView.contentOffset.y = attributes.frame.minY - anchor.1
         }
+        syncVisibleReadTracking()
     }
 }
 
@@ -1625,7 +1823,10 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
         if let postId = postIdByItem[item], let post = viewModel.postsById[postId] {
             let count = visibleItemCountsByPost[postId, default: 0]
             visibleItemCountsByPost[postId] = count + 1
-            if count == 0 { readTracker.recordVisible(postNumber: post.postNumber) }
+            if count == 0 {
+                prepareReadTracking(for: post)
+                readTracker.recordVisible(postNumber: post.postNumber)
+            }
         }
         guard indexPath.item >= collectionView.numberOfItems(inSection: 0) - 3,
               !isLoadingPage,
@@ -1658,6 +1859,11 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
         let next = max(0, visibleItemCountsByPost[postId, default: 1] - 1)
         visibleItemCountsByPost[postId] = next
         if next == 0, let post = viewModel.postsById[postId] {
+            if onScreenPostIDs().contains(postId) {
+                visibleItemCountsByPost[postId] = 1
+                readTracker.recordVisible(postNumber: post.postNumber)
+                return
+            }
             readTracker.recordHidden(postNumber: post.postNumber)
         }
     }
@@ -1702,6 +1908,7 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        readTracker.markScrolled()
         let currentOffset = scrollView.contentOffset.y
         let isMovingTowardEarlierPosts = currentOffset < lastScrollOffset
         lastScrollOffset = currentOffset
