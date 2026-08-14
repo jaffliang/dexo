@@ -41,8 +41,9 @@
 - [x] **Cookie-Editor 导出** — 设置 /「我」可复制 Cookie-Editor JSON，供 Safari 导入
 - [x] **第三方输入法** — 密码框默认明文；仅在用户选择隐藏时启用安全输入，避免 iOS 15 屏蔽搜狗等第三方键盘
 - [x] **崩溃诊断** — 登录面包屑，以及冷启动时可复制的上次崩溃信息
-- [x] **WebView DoH** — 上游已有 DoH `URLProtocol`；本 fork 在 iOS 17+ 还会通过 CONNECT 代理把 DoH 应用到正式 WKWebView
-- [x] **URLSession DoH 代理（iOS 15）** — 论坛 API / Alamofire / URLSession 图片可通过应用内环回网关使用自定义 DoH（源站 HTTPS RR 提供 ECH 配置时隐藏 SNI，否则按解析 IP 走 TLS 1.3）。iOS 17 以下 WKWebView 仍使用系统 DNS
+- [x] **WebView DoH（iOS 17+）** — 上游已有 DoH `URLProtocol`；本 fork 在 iOS 17+ 还会通过 CONNECT 代理把 DoH 应用到正式 WKWebView。iOS 15 上 WKWebView **不**走该代理
+- [x] **URLSession / Alamofire DoH 网关（iOS 15）** — 论坛 API、话题列表、账密登录和 URLSession 图片可通过应用内环回网关使用自定义 DoH URL，包括 `https://jeff-dean.ddd.oaifree.com/query-dns` 这类端点。内置解析器 + 自定义。切换解析器在主线程外探测（约 4 秒上限），失败则回退或关闭，避免启动黑屏。仅覆盖 API 路径，不是全浏览器 DoH
+- [x] **ECH / HTTP/2 / brotli** — ECH 编进网关（ECH 编不过则构建失败，不会静默降级）。源站发布 HTTPS RR 时使用。Cloudflare 选择 `h2` 时走 HTTP/2；该路径支持 brotli 解码
 
 ## 技术栈
 
@@ -109,7 +110,7 @@ dexo/
 
 ## 发布
 
-IPA 工作流跑完后，未签名 IPA 会发布到 [GitHub Releases](https://github.com/jaffliang/dexo/releases)，标签形如 `v2.0-build.NNN`。Pull Request 的 CI 也会上传 Debug IPA artifact。
+IPA 工作流跑完后，未签名 IPA 会发布到 [GitHub Releases](https://github.com/jaffliang/dexo/releases)，标签形如 `v2.1-build.NNN`。Pull Request 的 CI 也会上传 Debug IPA artifact。
 
 ## 致谢
 

@@ -41,8 +41,9 @@ This fork keeps the upstream Discourse client and adds linux.do / idcflare.com s
 - [x] **Cookie-Editor export** — Settings / Me copies Cookie-Editor JSON for Safari import
 - [x] **Third-party IME** — Password field is visible by default; secure entry is on only while hiding, so iOS 15 third-party keyboards keep working
 - [x] **Crash diagnostics** — Login breadcrumbs plus a copyable last-crash alert on cold start
-- [x] **WebView DoH** — Upstream already has DoH `URLProtocol`; this fork also applies DoH to production WKWebViews via a CONNECT proxy on iOS 17+
-- [x] **URLSession DoH proxy (iOS 15)** — Forum API / Alamofire / URLSession images can use a custom DoH resolver through an app-local loopback gateway (ECH when the origin publishes an HTTPS RR; otherwise connect-by-IP with TLS 1.3). WKWebView stays on system DNS below iOS 17
+- [x] **WebView DoH (iOS 17+)** — Upstream already has DoH `URLProtocol`; this fork also applies DoH to production WKWebViews via a CONNECT proxy on iOS 17+. On iOS 15, WKWebView is not proxied
+- [x] **URLSession / Alamofire DoH gateway (iOS 15)** — Forum API, topic lists, password login, and URLSession images can use a custom DoH URL through an app-local loopback gateway, including endpoints like `https://jeff-dean.ddd.oaifree.com/query-dns`. Built-in resolvers plus custom. Switching probes off the main thread (~4s cap) and reverts or disables on failure so launch never black-screens. This is the API path only — not a full-browser DoH proxy
+- [x] **ECH / HTTP/2 / brotli** — ECH is compiled in (the gateway build fails if ECH does not compile; no silent fallback). Used when the origin publishes an HTTPS RR. HTTP/2 when Cloudflare selects `h2`; brotli decode on that path
 
 ## Tech Stack
 
@@ -109,7 +110,7 @@ dexo/
 
 ## Releases
 
-Unsigned IPAs are published on [GitHub Releases](https://github.com/jaffliang/dexo/releases) after the IPA workflow runs (`v2.0-build.NNN`). Pull requests also upload a Debug IPA artifact.
+Unsigned IPAs are published on [GitHub Releases](https://github.com/jaffliang/dexo/releases) after the IPA workflow runs (`v2.1-build.NNN`). Pull requests also upload a Debug IPA artifact.
 
 ## Credit
 

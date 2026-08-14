@@ -356,7 +356,7 @@ extension SettingsViewController: UITableViewDataSource {
     private static let aboutURL = URL(string: "https://github.com/jaffliang/dexo")
 
     private var marketingVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.1"
     }
 
     private func makeAboutCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
