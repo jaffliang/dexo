@@ -44,6 +44,7 @@ This fork keeps the upstream Discourse client and adds linux.do / idcflare.com s
 - [x] **WebView DoH (iOS 17+)** — Upstream already has DoH `URLProtocol`; this fork also applies DoH to production WKWebViews via a CONNECT proxy on iOS 17+. On iOS 15, WKWebView is not proxied
 - [x] **URLSession / Alamofire DoH gateway (iOS 15)** — Forum API, topic lists, password login, and URLSession images can use a custom DoH URL through an app-local loopback gateway, including endpoints like `https://jeff-dean.ddd.oaifree.com/query-dns`. Built-in resolvers plus custom. Switching probes off the main thread (~4s cap) and reverts or disables on failure so launch never black-screens. This is the API path only — not a full-browser DoH proxy
 - [x] **ECH / HTTP/2 / brotli** — ECH is compiled in (the gateway build fails if ECH does not compile; no silent fallback). Used when the origin publishes an HTTPS RR. HTTP/2 when Cloudflare selects `h2`; brotli decode on that path
+- [x] **Read-time reporting** — Separate Settings switches for linux.do and idcflare (linux.do off by default, idcflare on). Guests never report and never see the unread-timing chrome. When reporting is on, a small blue dot appears next to the post number until that floor is timed. After 3 consecutive failures that site’s switch turns off automatically to avoid risk control; turn it back on in Settings
 
 ## Tech Stack
 
@@ -110,7 +111,7 @@ dexo/
 
 ## Releases
 
-Unsigned IPAs are published on [GitHub Releases](https://github.com/jaffliang/dexo/releases) after the IPA workflow runs (`v2.1-build.NNN`). Pull requests also upload a Debug IPA artifact.
+Unsigned IPAs are published on [GitHub Releases](https://github.com/jaffliang/dexo/releases) after the IPA workflow runs (`v2.2-build.NNN`). Pull requests also upload a Debug IPA artifact.
 
 ## Credit
 

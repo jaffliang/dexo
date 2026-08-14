@@ -44,6 +44,7 @@
 - [x] **WebView DoH（iOS 17+）** — 上游已有 DoH `URLProtocol`；本 fork 在 iOS 17+ 还会通过 CONNECT 代理把 DoH 应用到正式 WKWebView。iOS 15 上 WKWebView **不**走该代理
 - [x] **URLSession / Alamofire DoH 网关（iOS 15）** — 论坛 API、话题列表、账密登录和 URLSession 图片可通过应用内环回网关使用自定义 DoH URL，包括 `https://jeff-dean.ddd.oaifree.com/query-dns` 这类端点。内置解析器 + 自定义。切换解析器在主线程外探测（约 4 秒上限），失败则回退或关闭，避免启动黑屏。仅覆盖 API 路径，不是全浏览器 DoH
 - [x] **ECH / HTTP/2 / brotli** — ECH 编进网关（ECH 编不过则构建失败，不会静默降级）。源站发布 HTTPS RR 时使用。Cloudflare 选择 `h2` 时走 HTTP/2；该路径支持 brotli 解码
+- [x] **阅读时间上报** — linux.do 与 idcflare 各有独立开关（linux.do 默认关，idcflare 默认开）。未登录不上报，也不显示未读计时标记。开启后楼层号旁会出现小蓝点，该楼阅读时间计入后消失。连续失败 3 次后仅关闭对应站点开关，以免触发风控；可在设置中重新开启，并在上报记录中查看状态
 
 ## 技术栈
 
@@ -110,7 +111,7 @@ dexo/
 
 ## 发布
 
-IPA 工作流跑完后，未签名 IPA 会发布到 [GitHub Releases](https://github.com/jaffliang/dexo/releases)，标签形如 `v2.1-build.NNN`。Pull Request 的 CI 也会上传 Debug IPA artifact。
+IPA 工作流跑完后，未签名 IPA 会发布到 [GitHub Releases](https://github.com/jaffliang/dexo/releases)，标签形如 `v2.2-build.NNN`。Pull Request 的 CI 也会上传 Debug IPA artifact。
 
 ## 致谢
 

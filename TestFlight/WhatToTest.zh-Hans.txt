@@ -1,10 +1,12 @@
 What to Test
 
-Dexo 2.1（iOS 15+）
+Dexo 2.2（iOS 15+）
 
 - 设置 → 网络 → DoH：开启内置解析器或自定义 HTTPS DoH URL（包括 `https://jeff-dean.ddd.oaifree.com/query-dns` 这类端点）。确认论坛 API、话题列表和账密登录仍可用。iOS 15 上应用内 WKWebView 网页不走该代理。
 - 切换 DoH 解析器时界面应保持可点（探测在主线程外，约 4 秒上限）。解析失败应回退或关闭 DoH，下次启动不得黑屏。
 - 在 DoH 设置中确认「ECH 已编译：是」。源站发布 HTTPS RR 时使用 ECH。Cloudflare 选择 `h2` 时走 HTTP/2；API 路径支持 brotli 解码。
+- 阅读时间：设置里 linux.do（默认关）与 idcflare（默认开）各有独立开关。未登录不得 POST `/topics/timings`，楼层旁也不得出现未读计时小蓝点。
+- 已登录且该站开关开启时，未读楼层号旁应出现小蓝点，该楼阅读时间计入后消失。连续失败 3 次后仅关闭对应站点开关以免风控，另一站开关不得被带关。可在设置中重新开启，并在上报记录中查看状态。
 - linux.do / idcflare.com：用用户名和密码登录。如出现 hCaptcha 请完成验证。若账号开启 TOTP 2FA，确认会弹出 6 位验证码（包括 Discourse 返回 `invalid_second_factor_method` 时），输入正确验证码后可登录。
 - 游客访问 linux.do / idcflare 时完成 Cloudflare 过盾，确认过盾后可浏览；随后登录，确认沿用同一份 clearance、无需再过一遍。
 - 登录后点击帖子里的 HTTPS 链接，以及「我」/设置里的「打开网页」。确认应用内浏览器已带登录态（如 cdk.linux.do、connect.linux.do OAuth）。打开 linux.do/login 不应卡在 iOS 15 上不可用的 SPA。
