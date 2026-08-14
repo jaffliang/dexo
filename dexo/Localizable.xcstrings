@@ -5741,6 +5741,38 @@
         }
       }
     },
+    "settings.doh.ech_compiled.no" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH compiled: no"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH 已编译：否"
+          }
+        }
+      }
+    },
+    "settings.doh.ech_compiled.yes" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH compiled: yes"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH 已编译：是"
+          }
+        }
+      }
+    },
     "settings.doh.edit" : {
       "localizations" : {
         "en" : {
@@ -5810,13 +5842,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use the selected resolver for supported app traffic"
+            "value" : "Route forum API and image traffic through a local DoH proxy. In-app web pages are unchanged."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "让支持的 App 流量使用所选解析服务器"
+            "value" : "让论坛 API 和图片请求走本地 DoH 代理。应用内网页不受影响。"
           }
         }
       }
@@ -5833,6 +5865,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "使用 DNS over HTTPS"
+          }
+        }
+      }
+    },
+    "settings.doh.enable_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The DoH gateway could not start: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DoH 网关未能启动：%@"
+          }
+        }
+      }
+    },
+    "settings.doh.enable_failed.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn’t enable DNS over HTTPS"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法开启 DNS over HTTPS"
+          }
+        }
+      }
+    },
+    "settings.doh.enable_failed.unknown" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The DoH gateway failed to start."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DoH 网关启动失败。"
           }
         }
       }
@@ -5874,13 +5954,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Uses this resolver for URLSession and image requests. On iOS 17 or later, in-app web pages also use it through a local proxy. It may conflict with VPN or Fake-IP proxy configurations."
+            "value" : "When on, forum API calls and URLSession image fetches go through a loopback proxy that resolves names over the selected DoH endpoint. Outbound TLS uses ECH when the origin publishes an HTTPS/SVCB config; otherwise it connects to the DoH-resolved IP with TLS 1.3 (visible SNI). Authenticated WebView, Safari, hCaptcha, and Cloudflare challenge pages stay on system DNS/TLS. May conflict with VPN or Fake-IP proxy configurations."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "用于 URLSession 和图片请求的域名解析。在 iOS 17 及以上版本，App 内网页也会通过本地代理使用该解析器。可能与 VPN 或 Fake-IP 代理配置冲突。"
+            "value" : "开启后，论坛 API 和 URLSession 图片请求会经过本地环回代理，并用所选 DoH 端点解析域名。若源站 HTTPS/SVCB 记录提供 ECH 配置，出站 TLS 会隐藏 SNI；否则按 DoH 解析到的 IP 使用 TLS 1.3（SNI 可见）。已登录网页、Safari、hCaptcha 和 Cloudflare 验证仍走系统 DNS/TLS。可能与 VPN 或 Fake-IP 代理配置冲突。"
           }
         }
       }
@@ -6020,13 +6100,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Encrypt DNS lookups to reduce exposure to local networks and untrusted resolvers."
+            "value" : "Encrypt DNS for URLSession, Alamofire, and image requests through an app-local DoH proxy. In-app WebView, Safari, hCaptcha, and Cloudflare challenges keep using system DNS."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "加密 DNS 查询，减少本地网络和不受信任解析器对域名访问的窥探。"
+            "value" : "通过应用内 DoH 代理加密 URLSession、Alamofire 和图片请求的 DNS。应用内网页、Safari、hCaptcha 和 Cloudflare 验证仍使用系统 DNS。"
           }
         }
       }
@@ -6068,13 +6148,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Manage encrypted DNS resolvers and choose the default server."
+            "value" : "Manage the DoH proxy used by forum API traffic. In-app WebView stays on system DNS until iOS 17."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "管理加密 DNS 解析服务器并选择默认服务器。"
+            "value" : "管理论坛 API 使用的 DoH 代理。应用内网页在 iOS 17 之前仍使用系统 DNS。"
           }
         }
       }
@@ -6133,13 +6213,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "https://example.com/dns-query"
+            "value" : "https://cloudflare-dns.com/dns-query"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "https://example.com/dns-query"
+            "value" : "https://cloudflare-dns.com/dns-query"
           }
         }
       }
@@ -6338,18 +6418,17 @@
       }
     },
     "settings.read_timings.footer" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do reporting is off by default and may trigger site protection. After 3 consecutive failures, including a Cloudflare challenge, Dexo turns it off automatically. Complete the challenge before enabling it again."
+            "value" : "linux.do reporting is off by default and may trigger site protection. Transient 405/429/5xx errors retry with backoff. 403 is not retried. The switch stays on; check report history for status."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do 阅读时间上报默认关闭，开启后可能触发站点防护。连续失败 3 次（包括 Cloudflare 验证/撞盾）后会自动关闭；请完成验证后再手动开启。"
+            "value" : "linux.do 阅读时间上报默认关闭，开启后可能触发站点防护。遇到 405/429/5xx 会自动退避重试，403 不重试。开关保持开启。可在上报记录中查看状态。"
           }
         }
       }

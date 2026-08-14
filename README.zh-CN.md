@@ -42,6 +42,7 @@
 - [x] **第三方输入法** — 密码框默认明文；仅在用户选择隐藏时启用安全输入，避免 iOS 15 屏蔽搜狗等第三方键盘
 - [x] **崩溃诊断** — 登录面包屑，以及冷启动时可复制的上次崩溃信息
 - [x] **WebView DoH** — 上游已有 DoH `URLProtocol`；本 fork 在 iOS 17+ 还会通过 CONNECT 代理把 DoH 应用到正式 WKWebView
+- [x] **URLSession DoH 代理（iOS 15）** — 论坛 API / Alamofire / URLSession 图片可通过应用内环回网关使用自定义 DoH（源站 HTTPS RR 提供 ECH 配置时隐藏 SNI，否则按解析 IP 走 TLS 1.3）。iOS 17 以下 WKWebView 仍使用系统 DNS
 
 ## 技术栈
 
@@ -85,7 +86,7 @@ make clean
 dexo/
 ├── Core/
 │   ├── Auth/           # 认证流程、Keychain、RSA 加解密
-│   ├── Networking/     # DoH URLProtocol
+│   ├── Networking/     # DoH URLProtocol + iOS 15 环回网关
 │   ├── Observable/     # ObservableViewController 基类
 │   └── Settings/       # 应用偏好设置
 ├── Database/           # GRDB 数据库管理 & 数据模型

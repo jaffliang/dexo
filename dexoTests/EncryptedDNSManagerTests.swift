@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import XCTest
 @testable import dexo
 
@@ -24,5 +25,27 @@ final class EncryptedDNSManagerTests: XCTestCase {
         XCTAssertNil(EncryptedDNSManager.normalizedServerURL("https://user:password@dns.example.com/dns-query"))
         XCTAssertNil(EncryptedDNSManager.normalizedServerURL("https://dns.example.com/dns-query#fragment"))
         XCTAssertNil(EncryptedDNSManager.normalizedServerURL("https://"))
+    }
+
+    func testApplyCurrentSettingsReturnsWithoutWaitingForProbe() {
+        let startedAt = Date()
+        EncryptedDNSManager.shared.applyCurrentSettings()
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+    }
+
+    func testApplyAsyncInvalidURLCompletesWithoutHanging() {
+        let finished = expectation(description: "applyAsync")
+        let startedAt = Date()
+        EncryptedDNSManager.shared.applyAsync(
+            enabled: true,
+            serverURLString: "http://dns.example.com/dns-query"
+        ) { ok in
+            XCTAssertFalse(ok)
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertTrue(DoHGatewayPolicy.shouldDisableDoHAfterLaunchStart(ok))
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 2)
     }
 }

@@ -81,6 +81,7 @@ enum ForumNotificationMetadataSynchronizer {
         configuration.timeoutIntervalForResource = 15
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
+        DoHGatewayRuntime.prepare(configuration)
         guard let (data, response) = try? await URLSession(configuration: configuration).data(from: url),
               let response = response as? HTTPURLResponse,
               (200 ..< 300).contains(response.statusCode),

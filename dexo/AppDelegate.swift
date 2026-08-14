@@ -22,9 +22,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // SceneDelegate presents the copy UI once the first window is up.
         DexoExceptionCatcher.installUncaughtExceptionHandler()
 
-        if !EncryptedDNSManager.shared.applyCurrentSettings() {
-            AppSettings.shared.dohEnabled = false
-        }
+        EncryptedDNSManager.shared.applyCurrentSettings()
 
         SDImageCodersManager.shared.addCoder(SDImageSVGCoder.shared)
 

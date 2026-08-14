@@ -30,3 +30,9 @@ Pods/
 
 # Local scratch / reference docs
 doc/
+
+# DoH gateway build products (rebuilt by scripts/build-doh-gateway.sh)
+Native/DoHGateway/target/
+Native/DoHGateway/dist/
+Packages/DoHGatewayPolicy/.build/
+

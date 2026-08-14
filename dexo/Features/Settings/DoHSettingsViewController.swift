@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import UIKit
 
 final class DoHSettingsViewController: ObservableViewController {
@@ -11,6 +12,21 @@ final class DoHSettingsViewController: ObservableViewController {
 
     private let settings = AppSettings.shared
     private let themeManager = ThemeManager.shared
+    private var applyGeneration = 0
+    private var isApplying = false
+
+    private lazy var applyingIndicator: UIActivityIndicatorView = {
+        let indicator = UIActivityIndicatorView(style: .medium)
+        indicator.hidesWhenStopped = true
+        return indicator
+    }()
+
+    private lazy var addServerButton = UIBarButtonItem(
+        image: UIImage(systemName: "plus"),
+        style: .plain,
+        target: self,
+        action: #selector(addServer)
+    )
 
     private lazy var tableView: UITableView = {
         let tableView = ThemedTableView(frame: .zero, style: .insetGrouped)
@@ -28,12 +44,7 @@ final class DoHSettingsViewController: ObservableViewController {
         super.viewDidLoad()
         title = String(localized: "settings.doh.title")
         navigationItem.largeTitleDisplayMode = .never
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            image: UIImage(systemName: "plus"),
-            style: .plain,
-            target: self,
-            action: #selector(addServer)
-        )
+        navigationItem.rightBarButtonItem = addServerButton
 
         view.addSubview(tableView)
         NSLayoutConstraint.activate([
@@ -50,36 +61,115 @@ final class DoHSettingsViewController: ObservableViewController {
         _ = settings.dohEnabled
         _ = settings.dohServers
         _ = settings.defaultDoHServerID
+        guard !isApplying else { return }
         tableView.reloadData()
     }
 
     override func applyThemeBackground() {
         super.applyThemeBackground()
-        guard isViewLoaded else { return }
+        guard isViewLoaded, !isApplying else { return }
         tableView.tintColor = themeManager.accentColor
         tableView.reloadData()
+    }
+
+    private func beginApplying() {
+        applyGeneration += 1
+        isApplying = true
+        tableView.isUserInteractionEnabled = false
+        applyingIndicator.startAnimating()
+        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: applyingIndicator)
+    }
+
+    private func endApplying() {
+        isApplying = false
+        tableView.isUserInteractionEnabled = true
+        applyingIndicator.stopAnimating()
+        navigationItem.rightBarButtonItem = addServerButton
     }
 
     private func applyResolverSettings() {
         guard let server = settings.defaultDoHServer else {
             settings.dohEnabled = false
-            _ = EncryptedDNSManager.shared.setEnabled(false, serverURLString: "")
+            beginApplying()
+            let generation = applyGeneration
+            EncryptedDNSManager.shared.applyAsync(enabled: false, serverURLString: "") { [weak self] _ in
+                guard let self, generation == self.applyGeneration else { return }
+                self.endApplying()
+                self.tableView.reloadData()
+            }
             return
         }
-        _ = EncryptedDNSManager.shared.setEnabled(
-            settings.dohEnabled,
+        let wantedEnabled = settings.dohEnabled
+        beginApplying()
+        let generation = applyGeneration
+        EncryptedDNSManager.shared.applyAsync(
+            enabled: wantedEnabled,
             serverURLString: server.urlString
-        )
+        ) { [weak self] started in
+            guard let self, generation == self.applyGeneration else { return }
+            if wantedEnabled && !started {
+                self.settings.dohEnabled = false
+                self.showEnableFailedAlert()
+            }
+            self.endApplying()
+            self.tableView.reloadData()
+        }
     }
 
     private func setDefaultServer(_ server: AppSettings.DoHServer) {
-        guard settings.defaultDoHServerID != server.id else { return }
-        settings.defaultDoHServerID = server.id
-        applyResolverSettings()
-        tableView.reloadSections(
-            IndexSet([Section.overview.rawValue, Section.servers.rawValue]),
-            with: .automatic
-        )
+        guard settings.defaultDoHServerID != server.id, !isApplying else { return }
+        let previousID = settings.defaultDoHServerID
+        let previousURL = settings.defaultDoHServer?.urlString ?? ""
+        let dohWasEnabled = settings.dohEnabled
+
+        if !dohWasEnabled {
+            settings.defaultDoHServerID = server.id
+            tableView.reloadSections(
+                IndexSet([Section.overview.rawValue, Section.servers.rawValue]),
+                with: .automatic
+            )
+            return
+        }
+
+        beginApplying()
+        let generation = applyGeneration
+        EncryptedDNSManager.shared.applyAsync(
+            enabled: true,
+            serverURLString: server.urlString
+        ) { [weak self] started in
+            guard let self, generation == self.applyGeneration else { return }
+            let decision = DoHGatewayPolicy.SettingsSwitch.afterStart(
+                dohWasEnabled: true,
+                startSucceeded: started
+            )
+            if decision.commitNewDefault {
+                self.settings.defaultDoHServerID = server.id
+                self.endApplying()
+                self.tableView.reloadData()
+                return
+            }
+
+            self.settings.defaultDoHServerID = previousID
+            guard decision.restorePreviousDefault, !previousURL.isEmpty else {
+                self.settings.dohEnabled = false
+                self.endApplying()
+                self.showEnableFailedAlert()
+                self.tableView.reloadData()
+                return
+            }
+            EncryptedDNSManager.shared.applyAsync(
+                enabled: true,
+                serverURLString: previousURL
+            ) { [weak self] restored in
+                guard let self, generation == self.applyGeneration else { return }
+                if !restored {
+                    self.settings.dohEnabled = false
+                }
+                self.endApplying()
+                self.showEnableFailedAlert()
+                self.tableView.reloadData()
+            }
+        }
     }
 
     @objc private func addServer() {
@@ -91,14 +181,16 @@ final class DoHSettingsViewController: ObservableViewController {
             guard let self else { return }
             let wasEmpty = settings.dohServers.isEmpty
             let wasDefault = settings.defaultDoHServerID == savedServer.id
+            let previous = settings.dohServers.first { $0.id == savedServer.id }
             settings.saveDoHServer(savedServer)
             if wasEmpty {
                 settings.defaultDoHServerID = savedServer.id
             }
             if settings.dohEnabled, wasEmpty || wasDefault {
-                applyResolverSettings()
+                self.reapplyEditedDefault(savedServer, previous: previous)
+            } else {
+                tableView.reloadData()
             }
-            tableView.reloadData()
         }
         navigationController?.pushViewController(editor, animated: true)
     }
@@ -141,26 +233,89 @@ final class DoHSettingsViewController: ObservableViewController {
         present(alert, animated: true)
     }
 
+    private func showEnableFailedAlert() {
+        let reason = DoHGatewayRuntime.shared.lastError
+            ?? String(localized: "settings.doh.enable_failed.unknown")
+        let message = String(localized: "settings.doh.enable_failed.message \(reason)")
+            + "\n"
+            + DoHGatewayRuntime.echCompiledLabel
+        let alert = UIAlertController(
+            title: String(localized: "settings.doh.enable_failed.title"),
+            message: message,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
+        present(alert, animated: true)
+    }
+
+    private func reapplyEditedDefault(
+        _ savedServer: AppSettings.DoHServer,
+        previous: AppSettings.DoHServer?
+    ) {
+        beginApplying()
+        let generation = applyGeneration
+        EncryptedDNSManager.shared.applyAsync(
+            enabled: true,
+            serverURLString: savedServer.urlString
+        ) { [weak self] started in
+            guard let self, generation == self.applyGeneration else { return }
+            if started {
+                self.endApplying()
+                self.tableView.reloadData()
+                return
+            }
+            if let previous {
+                self.settings.saveDoHServer(previous)
+                EncryptedDNSManager.shared.applyAsync(
+                    enabled: true,
+                    serverURLString: previous.urlString
+                ) { [weak self] restored in
+                    guard let self, generation == self.applyGeneration else { return }
+                    if !restored {
+                        self.settings.dohEnabled = false
+                    }
+                    self.endApplying()
+                    self.showEnableFailedAlert()
+                    self.tableView.reloadData()
+                }
+                return
+            }
+            self.settings.dohEnabled = false
+            self.endApplying()
+            self.showEnableFailedAlert()
+            self.tableView.reloadData()
+        }
+    }
+
     @objc private func dohSwitchChanged(_ sender: UISwitch) {
+        guard !isApplying else {
+            sender.setOn(settings.dohEnabled, animated: false)
+            return
+        }
         guard !sender.isOn || settings.defaultDoHServer != nil else {
             sender.setOn(false, animated: true)
             showNoServerAlert()
             return
         }
 
-        guard EncryptedDNSManager.shared.setEnabled(
-            sender.isOn,
+        beginApplying()
+        let generation = applyGeneration
+        let wanted = sender.isOn
+        EncryptedDNSManager.shared.applyAsync(
+            enabled: wanted,
             serverURLString: settings.defaultDoHServer?.urlString ?? ""
-        ) else {
-            sender.setOn(false, animated: true)
-            settings.dohEnabled = false
-            return
+        ) { [weak self] started in
+            guard let self, generation == self.applyGeneration else { return }
+            if wanted && !started {
+                sender.setOn(false, animated: true)
+                self.settings.dohEnabled = false
+                self.showEnableFailedAlert()
+            } else {
+                self.settings.dohEnabled = wanted
+            }
+            self.endApplying()
+            self.tableView.reloadData()
         }
-        settings.dohEnabled = sender.isOn
-        tableView.reloadSections(
-            IndexSet([Section.overview.rawValue, Section.control.rawValue]),
-            with: .automatic
-        )
     }
 }
 
@@ -385,7 +540,10 @@ private final class DoHOverviewCell: UITableViewCell {
         titleLabel.font = fontManager.font(size: 20, weight: .semibold)
         titleLabel.text = String(localized: "settings.doh.overview.title")
         messageLabel.font = fontManager.font(size: 14)
-        messageLabel.text = String(localized: "settings.doh.overview.message")
+        messageLabel.text = [
+            String(localized: "settings.doh.overview.message"),
+            DoHGatewayRuntime.echCompiledLabel,
+        ].joined(separator: "\n")
 
         statusLabel.font = fontManager.font(size: 12, weight: .semibold)
         statusLabel.text = isEnabled
@@ -571,8 +729,8 @@ private final class DoHServerEditorViewController: BaseViewController {
     init(server: AppSettings.DoHServer?, onSave: @escaping (AppSettings.DoHServer) -> Void) {
         originalServer = server
         self.onSave = onSave
-        name = server?.name ?? ""
-        endpoint = server?.urlString ?? ""
+        name = server?.name ?? "Cloudflare"
+        endpoint = server?.urlString ?? "https://cloudflare-dns.com/dns-query"
         super.init(nibName: nil, bundle: nil)
     }
 

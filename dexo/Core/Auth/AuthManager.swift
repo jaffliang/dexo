@@ -471,6 +471,7 @@ final class AuthManager: @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
+        DoHGatewayRuntime.prepare(configuration)
         return URLSession(
             configuration: configuration,
             delegate: RejectRedirectsDelegate(),

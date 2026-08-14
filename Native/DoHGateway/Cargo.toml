@@ -1,0 +1,40 @@
+[package]
+name = "dexo_doh_gateway"
+version = "0.1.0"
+edition = "2021"
+description = "App-local HTTP gateway: DoH name resolution plus outbound TLS 1.3 (ECH when an HTTPS RR publishes a config)"
+publish = false
+
+[lib]
+name = "dexo_doh_gateway"
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = ["ech"]
+# aws-lc-rs is required for rustls Encrypted Client Hello. Disable to build
+# with ring (DoH + connect-by-IP + visible SNI, no ECH).
+ech = ["rustls/aws_lc_rs", "dep:aws-lc-rs"]
+
+[dependencies]
+aws-lc-rs = { version = "1.12", optional = true, default-features = false, features = ["aws-lc-sys", "bindgen"] }
+rustls = { version = "0.23.25", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pki-types = "1.11"
+tokio = { version = "1.43", default-features = false, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+tokio-rustls = { version = "0.26.1", default-features = false, features = ["tls12"] }
+webpki-roots = "0.26.8"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+brotli-decompressor = { version = "5", default-features = false, features = ["std"] }
+bytes = "1"
+http = "1"
+h2 = { version = "0.4", default-features = false, features = ["stream"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+brotli = { version = "8", default-features = false, features = ["std"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
+panic = "abort"

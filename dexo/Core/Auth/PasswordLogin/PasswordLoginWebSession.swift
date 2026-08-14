@@ -170,7 +170,8 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     }
 }
 
-/// WKWebView session that runs csrf → hCaptcha create → session.json with browser TLS.
+/// WKWebView session for Cloudflare interstitial + hCaptcha only.
+/// csrf / hCaptcha create / session.json run on URLSession (`PasswordLoginAPIClient`).
 @MainActor
 final class PasswordLoginWebSession {
     private let forum: ForumInstance
@@ -204,8 +205,8 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // Skip DoH MITM so hCaptcha and csrf/session.json share the same
-        // direct TLS as in-place CF interstitial (no-op on iOS 15).
+        // Skip DoH MITM so Cloudflare + hCaptcha stay on system DNS/TLS
+        // (no-op on iOS 15). Login API traffic uses URLSession instead.
         if #available(iOS 17.0, *) {
             wkConfig.websiteDataStore.proxyConfigurations = []
         }
@@ -220,8 +221,8 @@ final class PasswordLoginWebSession {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // Persist `__dexoPasswordLogin` across CF interstitial navigations so
-        // csrf → hCaptcha create → session.json stay in this WebView kernel.
+        // Keep `__dexoPasswordLogin` injected for protocol tests. Login itself
+        // uses URLSession; this script is not invoked from completeLogin.
         controller.addUserScript(WKUserScript(
             source: Self.loginJavaScript(config: config),
             injectionTime: .atDocumentEnd,
@@ -265,7 +266,7 @@ final class PasswordLoginWebSession {
         }
         webDelegate?.isChallengeMode = false
         // loadHTMLString with only a baseURL is an opaque origin on WebKit;
-        // fetch('/session/csrf') then CORS-fails. Prime with a real same-origin
+        // hCaptcha then rejects the sitekey. Prime with a real same-origin
         // navigation first (this forum's robots.txt), then inject captcha HTML.
         try await navigateToSameOrigin()
         let hint = String(localized: "password_login.captcha_hint")
@@ -338,7 +339,8 @@ final class PasswordLoginWebSession {
     }
 
     /// Loads this forum's Cloudflare interstitial in this session's WKWebView
-    /// (same TLS kernel that will run csrf / hCaptcha create / session.json).
+    /// (system DNS/TLS). `cf_clearance` is copied to the native jar before
+    /// URLSession csrf / session.json.
     /// Does not present a second `ChallengeViewController`. linux.do uses
     /// `/challenge`; idcflare uses `/login` because `/challenge` is 404.
     func runInPlaceCloudflareChallenge(url: URL) async throws {
@@ -667,7 +669,7 @@ final class PasswordLoginWebSession {
         takeChallengeContinuation()?.resume()
     }
 
-    private func syncWebSessionToNativeJar() async {
+    func syncWebSessionToNativeJar() async {
         guard let webView else { return }
         await WebCookieStore.shared.syncFromWebView(
             webView.configuration.websiteDataStore,
@@ -754,8 +756,8 @@ final class PasswordLoginWebSession {
         JavaScriptJSONString.encode(value)
     }
 
-    /// Discourse csrf → hCaptcha create → session.json. Injected as a user
-    /// script so it survives in-place Cloudflare interstitial navigation.
+    /// Discourse csrf → hCaptcha create → session.json. Kept as a user script
+    /// for protocol tests; production login uses `PasswordLoginAPIClient`.
     /// Fetches use `credentials: 'include'` and never set Cookie / User-Agent / Origin.
     nonisolated static func loginJavaScript(config: PasswordLoginConfig) -> String {
         let endpointsJSON = (try? String(data: JSONEncoder().encode(config.hCaptchaCreateEndpoints), encoding: .utf8)) ?? "[]"

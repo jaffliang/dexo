@@ -446,7 +446,8 @@ final class PasswordLoginViewController: BaseViewController {
             let token = try await session.waitForCaptchaToken()
             lastCaptchaToken = token
             setBusy(true, status: String(localized: "password_login.status.signing_in"))
-            // Let WebKit finish unwinding onPass / popup close before login JS.
+            // Let WebKit finish unwinding onPass / popup close before the
+            // URLSession login API copies cf_clearance out of this WebView.
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 DispatchQueue.main.async { cont.resume() }
             }
@@ -470,11 +471,27 @@ final class PasswordLoginViewController: BaseViewController {
         captchaToken: String?,
         secondFactor: String?
     ) async throws {
-        let result = try await session.runLogin(
+        // WebView stays on system DNS for CF / hCaptcha. csrf + session.json
+        // must use URLSession so iOS 15 DoH gateway can reach linux.do.
+        if secondFactor == nil {
+            await session.syncWebSessionToNativeJar()
+        }
+        let trimmed = forum.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let forumURL = URL(string: trimmed) else {
+            throw PasswordLoginError.unexpected(status: 0, phase: "session", body: "invalid forum url")
+        }
+        PasswordLoginCrashBreadcrumb.record(.loginApiStart)
+        let result = await PasswordLoginAPIClient.login(
+            baseURL: forumURL,
+            config: config,
             identifier: identifier,
             password: password,
             hCaptchaToken: captchaToken,
             secondFactorToken: secondFactor
+        )
+        PasswordLoginCrashBreadcrumb.record(
+            .loginApiResult,
+            detail: "phase=\(result.phase) status=\(result.status)"
         )
 
         switch result.phase {
@@ -523,12 +540,17 @@ final class PasswordLoginViewController: BaseViewController {
             case .invalidCredentials:
                 throw PasswordLoginError.invalidCredentials
             case .signedIn:
-                let exported = try await session.exportSessionCookies()
+                // `_t` is set on the URLSession response. Do not syncFromWebView
+                // afterwards — the captcha WKWebView never saw that cookie.
+                let cookies = WebCookieStore.shared.cookies(for: forumURL)
+                guard cookies.contains(where: { $0.name == "_t" }) else {
+                    throw PasswordLoginError.missingSessionCookie
+                }
                 PasswordLoginCrashBreadcrumb.record(.loginViaWeb)
                 try await authManager.loginViaWeb(
                     forum: forum,
-                    cookies: exported.cookies,
-                    userAgent: exported.userAgent
+                    cookies: cookies,
+                    userAgent: WebCookieStore.shared.userAgent
                 )
                 PasswordLoginCrashBreadcrumb.finishSuccess()
                 session.tearDown()
