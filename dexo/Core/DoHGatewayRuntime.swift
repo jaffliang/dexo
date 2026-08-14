@@ -27,6 +27,17 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         return lastErrorStorage
     }
 
+    /// True when `libdexo_doh_gateway.a` was built with Encrypted Client Hello.
+    static var echCompiled: Bool {
+        dexo_doh_gateway_ech_compiled() != 0
+    }
+
+    static var echCompiledLabel: String {
+        echCompiled
+            ? String(localized: "settings.doh.ech_compiled.yes")
+            : String(localized: "settings.doh.ech_compiled.no")
+    }
+
     /// Inserts the gateway `URLProtocol` into every URLSession the app creates
     /// for forum API / image traffic. Safe to call more than once.
     static func prepare(_ configuration: URLSessionConfiguration) {

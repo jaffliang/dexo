@@ -35,6 +35,7 @@ jobs:
       - name: Build iOS DoH gateway static library
         run: |
           command -v cmake >/dev/null || brew install cmake
+          brew list llvm >/dev/null 2>&1 || brew install llvm
           chmod +x scripts/build-doh-gateway.sh
           ./scripts/build-doh-gateway.sh
 

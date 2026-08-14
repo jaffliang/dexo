@@ -5741,6 +5741,38 @@
         }
       }
     },
+    "settings.doh.ech_compiled.no" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH compiled: no"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH 已编译：否"
+          }
+        }
+      }
+    },
+    "settings.doh.ech_compiled.yes" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH compiled: yes"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ECH 已编译：是"
+          }
+        }
+      }
+    },
     "settings.doh.edit" : {
       "localizations" : {
         "en" : {

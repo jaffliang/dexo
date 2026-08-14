@@ -16,7 +16,7 @@ default = ["ech"]
 ech = ["rustls/aws_lc_rs", "dep:aws-lc-rs"]
 
 [dependencies]
-aws-lc-rs = { version = "1.12", optional = true, default-features = false, features = ["aws-lc-sys"] }
+aws-lc-rs = { version = "1.12", optional = true, default-features = false, features = ["aws-lc-sys", "bindgen"] }
 rustls = { version = "0.23.25", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pki-types = "1.11"
 tokio = { version = "1.43", default-features = false, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }

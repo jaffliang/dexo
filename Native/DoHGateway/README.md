@@ -19,7 +19,9 @@ There is no MITM CA on this path. One TLS hop, from this process to the origin.
 
 ## Rebuild
 
-Requires Rust 1.85+, cmake (for aws-lc-rs / ECH), and Xcode.
+Requires Rust 1.85+, cmake, libclang (Xcode or Homebrew `llvm`), and Xcode.
+`aws-lc-rs` is built with the `bindgen` feature so `aarch64-apple-ios`
+bindings can be generated. The script **fails** if ECH does not compile.
 
 ```bash
 # From the repository root, on a Mac with Xcode:
@@ -30,9 +32,6 @@ CI runs the same script before `xcodebuild`. Outputs:
 
 - `dist/iphoneos/libdexo_doh_gateway.a`
 - `dist/iphonesimulator/libdexo_doh_gateway.a` (when the simulator SDK exists)
-
-If the ECH/aws-lc-rs iOS build fails, the script retries without `ech`
-(ring provider, DoH + IP connect, visible SNI).
 
 ## Tests
 

@@ -31,6 +31,14 @@ final class DoHGatewayRuntimeTests: XCTestCase {
         }
     }
 
+    func testECHCompiledIsExposed() {
+        XCTAssertTrue(
+            DoHGatewayRuntime.echCompiled,
+            "libdexo_doh_gateway.a must be built with --features ech"
+        )
+        XCTAssertFalse(DoHGatewayRuntime.echCompiledLabel.isEmpty)
+    }
+
     func testInvalidDoHURLRecordsStartError() {
         XCTAssertFalse(DoHGatewayRuntime.shared.setEnabled(true, serverURLString: "http://dns.example.com/dns-query"))
         let reason = DoHGatewayRuntime.shared.lastError ?? ""

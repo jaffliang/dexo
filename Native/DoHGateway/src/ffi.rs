@@ -135,9 +135,32 @@ pub extern "C" fn dexo_doh_gateway_is_running() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn dexo_doh_gateway_ech_compiled() -> i32 {
+    i32::from(cfg!(feature = "ech"))
+}
+
+#[no_mangle]
 pub extern "C" fn dexo_doh_gateway_last_error() -> *const c_char {
     match LAST_ERROR.lock() {
         Ok(slot) => slot.as_ref().map(|value| value.as_ptr()).unwrap_or_else(empty_cstr),
         Err(_) => empty_cstr(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ech_compiled_matches_crate_feature() {
+        assert_eq!(
+            dexo_doh_gateway_ech_compiled(),
+            i32::from(cfg!(feature = "ech"))
+        );
+        assert_eq!(
+            dexo_doh_gateway_ech_compiled(),
+            1,
+            "default cargo test must build with ECH"
+        );
     }
 }

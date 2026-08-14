@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cross-compiles libdexo_doh_gateway.a for iOS device (and simulator when the
-# SDK is present). Used by GitHub Actions before xcodebuild so the Tuist app
-# can link the static library without a developer Mac.
+# SDK is present). ECH (aws-lc-rs) is required: this script must not fall
+# back to ring / visible-SNI-only.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,16 +25,87 @@ if ! command -v xcrun >/dev/null 2>&1; then
 fi
 
 if ! command -v cmake >/dev/null 2>&1; then
-  echo "warning: cmake not on PATH; aws-lc-rs (ECH) may fail to compile" >&2
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing cmake (required for aws-lc-rs ECH)"
+    brew install cmake
+  fi
+fi
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "error: cmake is required to compile aws-lc-rs ECH for iOS" >&2
+  exit 1
 fi
 
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}"
+
+ensure_libclang() {
+  if [[ -n "${LIBCLANG_PATH:-}" && -e "${LIBCLANG_PATH}/libclang.dylib" ]]; then
+    return 0
+  fi
+  local xcode_lib
+  xcode_lib="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+  if [[ -e "${xcode_lib}/libclang.dylib" ]]; then
+    export LIBCLANG_PATH="$xcode_lib"
+    echo "Using Xcode libclang at ${LIBCLANG_PATH}"
+    return 0
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    if [[ ! -e "$(brew --prefix llvm 2>/dev/null)/lib/libclang.dylib" ]]; then
+      echo "Installing Homebrew llvm (libclang for aws-lc-sys bindgen)"
+      brew install llvm
+    fi
+    export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+    export PATH="$(brew --prefix llvm)/bin:${PATH}"
+    echo "Using Homebrew libclang at ${LIBCLANG_PATH}"
+  fi
+  if [[ ! -e "${LIBCLANG_PATH:-}/libclang.dylib" ]]; then
+    echo "error: libclang not found; aws-lc-sys bindgen cannot generate aarch64-apple-ios bindings" >&2
+    exit 1
+  fi
+}
+
+prepare_ios_ech_env() {
+  local triple="$1"
+  local sdk
+  local clang_target
+  local min_flag
+  case "$triple" in
+    aarch64-apple-ios)
+      sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+      clang_target="arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}"
+      min_flag="-miphoneos-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+      ;;
+    aarch64-apple-ios-sim)
+      sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+      clang_target="arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator"
+      min_flag="-mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+      ;;
+    *)
+      echo "error: unsupported triple ${triple}" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+    echo "error: missing iOS SDK for ${triple}" >&2
+    exit 1
+  fi
+
+  local env_suffix
+  env_suffix="$(printf '%s' "$triple" | tr '-' '_')"
+  local clang_args="--target=${clang_target} -isysroot ${sdk} ${min_flag}"
+  export "BINDGEN_EXTRA_CLANG_ARGS_${env_suffix}=${clang_args}"
+  export BINDGEN_EXTRA_CLANG_ARGS="${clang_args}"
+  export CMAKE_OSX_SYSROOT="$sdk"
+  export SDKROOT="$sdk"
+  echo "bindgen ${env_suffix}: ${clang_args}"
+}
+
+ensure_libclang
 
 cd "$CRATE"
 rustup show >/dev/null
 rustup target add aarch64-apple-ios
 if xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then
-  rustup target add aarch64-apple-ios-sim || true
+  rustup target add aarch64-apple-ios-sim
 fi
 
 copy_lib() {
@@ -47,22 +118,16 @@ copy_lib() {
 build_target() {
   local triple="$1"
   local dest="$2"
-  echo "Building dexo_doh_gateway for ${triple} with ECH"
-  if cargo build --release --target "$triple" --features ech; then
-    copy_lib "$triple" "$dest"
-    return 0
-  fi
-  echo "warning: ECH (aws-lc-rs) build failed for ${triple}; retrying without ECH" >&2
-  cargo build --release --target "$triple" --no-default-features
+  prepare_ios_ech_env "$triple"
+  echo "Building dexo_doh_gateway for ${triple} with ECH (required)"
+  cargo build --release --target "$triple" --features ech
   copy_lib "$triple" "$dest"
 }
 
 build_target aarch64-apple-ios "$DIST/iphoneos"
 
 if xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then
-  build_target aarch64-apple-ios-sim "$DIST/iphonesimulator" || {
-    echo "warning: simulator library was not built" >&2
-  }
+  build_target aarch64-apple-ios-sim "$DIST/iphonesimulator"
 fi
 
 echo "DoH gateway libraries:"

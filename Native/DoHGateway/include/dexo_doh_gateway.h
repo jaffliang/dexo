@@ -30,6 +30,10 @@ int32_t dexo_doh_gateway_is_running(void);
 /// next `dexo_doh_gateway_start` call.
 const char *dexo_doh_gateway_last_error(void);
 
+/// 1 when this static library was built with Encrypted Client Hello
+/// (`--features ech` / aws-lc-rs). 0 means visible SNI only.
+int32_t dexo_doh_gateway_ech_compiled(void);
+
 #ifdef __cplusplus
 }
 #endif

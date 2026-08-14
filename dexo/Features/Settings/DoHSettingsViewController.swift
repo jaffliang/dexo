@@ -150,9 +150,12 @@ final class DoHSettingsViewController: ObservableViewController {
     private func showEnableFailedAlert() {
         let reason = DoHGatewayRuntime.shared.lastError
             ?? String(localized: "settings.doh.enable_failed.unknown")
+        let message = String(localized: "settings.doh.enable_failed.message \(reason)")
+            + "\n"
+            + DoHGatewayRuntime.echCompiledLabel
         let alert = UIAlertController(
             title: String(localized: "settings.doh.enable_failed.title"),
-            message: String(localized: "settings.doh.enable_failed.message \(reason)"),
+            message: message,
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
@@ -404,7 +407,10 @@ private final class DoHOverviewCell: UITableViewCell {
         titleLabel.font = fontManager.font(size: 20, weight: .semibold)
         titleLabel.text = String(localized: "settings.doh.overview.title")
         messageLabel.font = fontManager.font(size: 14)
-        messageLabel.text = String(localized: "settings.doh.overview.message")
+        messageLabel.text = [
+            String(localized: "settings.doh.overview.message"),
+            DoHGatewayRuntime.echCompiledLabel,
+        ].joined(separator: "\n")
 
         statusLabel.font = fontManager.font(size: 12, weight: .semibold)
         statusLabel.text = isEnabled
