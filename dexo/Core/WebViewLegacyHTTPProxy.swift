@@ -4,7 +4,10 @@ import WebKit
 /// Swift entry points for the iOS 15/16 WKWebView HTTP proxy hooks.
 enum WebViewLegacyHTTPProxy {
     static func apply(port: UInt16, to dataStore: WKWebsiteDataStore) -> Bool {
-        WKWebsiteDataStore.dexo_applyProxyPort(port, to: dataStore)
+        if WebViewDoHProxy.isProcessSharedDataStore(dataStore) {
+            return false
+        }
+        return WKWebsiteDataStore.dexo_applyProxyPort(port, to: dataStore)
     }
 
     static func clear(_ dataStore: WKWebsiteDataStore) {

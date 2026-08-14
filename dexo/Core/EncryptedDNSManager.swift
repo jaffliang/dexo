@@ -47,6 +47,9 @@ final class EncryptedDNSManager {
         completion: @escaping (Bool) -> Void
     ) {
         prepareSystemResolversForGatewayChange(enabled: enabled)
+        // iOS 15: strip leftover `_setProxyConfiguration:` on shared/default
+        // jars. Does not start the CONNECT listener.
+        WebViewDoHProxy.clearLeakedLegacyProxies()
         DoHGatewayRuntime.shared.applyAsync(
             enabled: enabled,
             serverURLString: serverURLString
@@ -67,6 +70,7 @@ final class EncryptedDNSManager {
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         prepareSystemResolversForGatewayChange(enabled: enabled)
+        WebViewDoHProxy.clearLeakedLegacyProxies()
         guard enabled else {
             DoHGatewayRuntime.shared.stop()
             return true
@@ -85,9 +89,11 @@ final class EncryptedDNSManager {
         if !enabled {
             disablePrivacyContext()
         }
-        // Existing proxy sessions may keep resolved addresses and open
-        // connections, so changing the resolver must rebuild them.
-        WebViewDoHProxy.shared.stop()
+        if #available(iOS 17.0, *) {
+            // Existing proxy sessions may keep resolved addresses and open
+            // connections, so changing the resolver must rebuild them.
+            WebViewDoHProxy.shared.stop()
+        }
     }
 
     private func disablePrivacyContext() {

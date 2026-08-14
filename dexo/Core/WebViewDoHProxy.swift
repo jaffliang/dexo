@@ -8,9 +8,11 @@ import WebKit
 /// proxy. Forum hosts are MITM'd so upstream TLS can use the DoH/ECH gateway;
 /// Cloudflare Turnstile and hCaptcha stay end-to-end.
 ///
-/// iOS 17+ uses public `ProxyConfiguration`. iOS 15/16 attach the same
-/// listener through WebKit's per-data-store HTTP proxy hooks (string
-/// selectors only) and keep one shared jar so `cf_clearance` still syncs.
+/// iOS 17+ uses public `ProxyConfiguration`. iOS 15/16 never apply
+/// `_setProxyConfiguration:` to the shared cookie jar or `.default()` —
+/// that SPI leaked into process URLSession. A dedicated store is used
+/// instead, and leftover proxy settings on those jars are cleared on
+/// DoH apply so challenge2 installs can recover.
 enum WebViewDoHConfigurator {
     static func configure(_ configuration: WKWebViewConfiguration) async throws -> AnyObject? {
         let dataStore = WKWebsiteDataStore.default()
@@ -111,23 +113,13 @@ enum WebViewDoHConfigurator {
             return
         }
 
-        // iOS 15/16: keep the caller's jar (shared Cloudflare cookies) and
-        // attach the CONNECT listener in place. Only mint a replacement
-        // store if `_setProxyConfiguration:` is missing on that instance.
+        // iOS 15 `_setProxyConfiguration:` is not WebView-scoped. Never
+        // apply it to an existing store — especially the shared cookie
+        // jar or `.default()`. Use a dedicated store created with httpProxy.
         let existing = configuration.websiteDataStore
-        if WebViewLegacyHTTPProxy.apply(port: lease.port, to: existing) {
-            #if DEBUG
-            print("[WebViewDoHProxy] attached CONNECT proxy to existing data store on 127.0.0.1:\(lease.port)")
-            #endif
-            return
-        }
-
         do {
             let store = try WebViewDoHProxy.shared.legacyProxiedDataStore(port: lease.port)
             configuration.websiteDataStore = store
-            #if DEBUG
-            print("[WebViewDoHProxy] replaced data store with proxied store on 127.0.0.1:\(lease.port)")
-            #endif
         } catch {
             throw WebViewDoHProxy.ProxyError.legacyProxyAttachFailed(
                 WebViewLegacyHTTPProxy.attachFailureReason(port: lease.port, dataStore: existing)
@@ -303,35 +295,44 @@ final class WebViewDoHProxy {
     }
 
     func stop() {
-        if #available(iOS 17.0, *) {
-            WKWebsiteDataStore.default().proxyConfigurations = []
-        } else {
-            WebViewLegacyHTTPProxy.clear(WKWebsiteDataStore.default())
-            if let cachedLegacyDataStore {
-                WebViewLegacyHTTPProxy.clear(cachedLegacyDataStore)
-            }
-            WebViewLegacyHTTPProxy.clear(WebCookieStore.shared.websiteDataStore)
+        Self.clearLeakedLegacyProxies()
+        if #unavailable(iOS 17.0), let cachedLegacyDataStore {
+            WebViewLegacyHTTPProxy.clear(cachedLegacyDataStore)
         }
         cachedLegacyDataStore = nil
         stopListener(error: ProxyError.listenerStopped)
+    }
+
+    /// Clears leftover CONNECT proxy settings on the process-shared jars.
+    /// Does not start the listener or attach a new proxy.
+    static func clearLeakedLegacyProxies() {
+        if #available(iOS 17.0, *) {
+            WKWebsiteDataStore.default().proxyConfigurations = []
+            WebCookieStore.shared.websiteDataStore.proxyConfigurations = []
+            return
+        }
+        WebViewLegacyHTTPProxy.clear(WKWebsiteDataStore.default())
+        WebViewLegacyHTTPProxy.clear(WebCookieStore.shared.websiteDataStore)
+    }
+
+    static func isProcessSharedDataStore(_ store: WKWebsiteDataStore) -> Bool {
+        store === WKWebsiteDataStore.default() || store === WebCookieStore.shared.websiteDataStore
     }
 
     func legacyProxiedDataStore(port: UInt16) throws -> WKWebsiteDataStore {
         if let cachedLegacyDataStore {
             return cachedLegacyDataStore
         }
-        if let store = WebViewLegacyHTTPProxy.makeNonPersistentDataStore(port: port) {
-            cachedLegacyDataStore = store
-            return store
+        guard let store = WebViewLegacyHTTPProxy.makeNonPersistentDataStore(port: port) else {
+            throw ProxyError.legacyProxyAttachFailed(
+                WebViewLegacyHTTPProxy.attachFailureReason(
+                    port: port,
+                    dataStore: WKWebsiteDataStore.nonPersistent()
+                )
+            )
         }
-        let fallback = WKWebsiteDataStore.nonPersistent()
-        if WebViewLegacyHTTPProxy.apply(port: port, to: fallback) {
-            cachedLegacyDataStore = fallback
-            return fallback
-        }
-        throw ProxyError.legacyProxyAttachFailed(
-            WebViewLegacyHTTPProxy.attachFailureReason(port: port, dataStore: fallback)
-        )
+        cachedLegacyDataStore = store
+        return store
     }
 
     private func startListener() throws {
