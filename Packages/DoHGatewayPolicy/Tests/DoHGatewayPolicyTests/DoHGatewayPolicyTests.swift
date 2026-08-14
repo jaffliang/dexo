@@ -144,7 +144,7 @@ final class DoHGatewayPolicyTests: XCTestCase {
     }
 
     func testSettingsSwitchDoesNotCommitFailedDefaultWhileDoHIsOn() {
-        let previous = "custom-oaifree"
+        let previous = "custom-doh"
         let candidate = "cloudflare"
         XCTAssertEqual(
             DoHGatewayPolicy.SettingsSwitch.afterStart(dohWasEnabled: true, startSucceeded: false),
