@@ -12,6 +12,7 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         dohHost: nil
     )
     private var lastErrorStorage: String?
+    private var didRegisterURLProtocol = false
 
     private init() {}
 
@@ -73,6 +74,7 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
             dohHost: serverURL.host
         )
         lock.unlock()
+        registerGlobalURLProtocol()
         print("[DoHGateway] URLSession/Alamofire traffic via 127.0.0.1:\(port) doh=\(serverURL.absoluteString)")
         return true
     }
@@ -98,6 +100,7 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
 
     private func stopListener() {
         dexo_doh_gateway_stop()
+        unregisterGlobalURLProtocol()
         lock.lock()
         configuration = DoHGatewayPolicy.Configuration(
             isEnabled: false,
@@ -105,5 +108,25 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
             dohHost: nil
         )
         lock.unlock()
+    }
+
+    /// So `URLSession.shared` and configs that missed `prepare` still rewrite.
+    /// The inner Relay session sets `protocolClasses = []` and will not recurse.
+    private func registerGlobalURLProtocol() {
+        lock.lock()
+        let already = didRegisterURLProtocol
+        if !already { didRegisterURLProtocol = true }
+        lock.unlock()
+        guard !already else { return }
+        URLProtocol.registerClass(DoHGatewayURLProtocol.self)
+    }
+
+    private func unregisterGlobalURLProtocol() {
+        lock.lock()
+        let shouldUnregister = didRegisterURLProtocol
+        didRegisterURLProtocol = false
+        lock.unlock()
+        guard shouldUnregister else { return }
+        URLProtocol.unregisterClass(DoHGatewayURLProtocol.self)
     }
 }

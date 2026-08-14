@@ -46,6 +46,7 @@ final class PushRelayAPI: Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpCookieStorage = nil
         configuration.urlCache = nil
+        DoHGatewayRuntime.prepare(configuration)
         session = URLSession(configuration: configuration)
     }
 

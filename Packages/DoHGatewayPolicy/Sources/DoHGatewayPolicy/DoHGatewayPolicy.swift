@@ -17,6 +17,16 @@ public enum DoHGatewayPolicy {
     public static let upstreamPortHeader = "X-Dexo-Gateway-Port"
     public static let upstreamSchemeHeader = "X-Dexo-Gateway-Scheme"
 
+    /// Inner `URLProtocol` relay must return 3xx to the client. Following
+    /// `Location: https://…` on a session with `protocolClasses = []` does
+    /// visible-SNI TLS and surfaces `URLError.secureConnectionFailed`.
+    public static let relayFollowsHTTPRedirects = false
+
+    /// `NWParameters.PrivacyContext` is encrypted DNS only (visible SNI).
+    /// On iOS 15 the loopback gateway is the only ECH path — keep this off
+    /// while the gateway is active so leaked URLSessions fail closed.
+    public static let enablePrivacyContextWhileGatewayActive = false
+
     public struct Configuration: Equatable, Sendable {
         public var isEnabled: Bool
         public var gatewayPort: Int
@@ -167,6 +177,19 @@ public enum DoHGatewayPolicy {
             return nil
         }
         return url
+    }
+
+    /// Strip hop headers from an inner-session redirect so the outer
+    /// URLSession re-issues a normal `https://` URL and we rewrite again.
+    /// Leaving `X-Dexo-Gateway-Skip` on `Location` would skip the protocol
+    /// and handshake TLS with visible SNI.
+    public static func requestForOuterRedirect(_ newRequest: URLRequest) -> URLRequest {
+        var request = newRequest
+        request.setValue(nil, forHTTPHeaderField: skipHeader)
+        request.setValue(nil, forHTTPHeaderField: upstreamHostHeader)
+        request.setValue(nil, forHTTPHeaderField: upstreamPortHeader)
+        request.setValue(nil, forHTTPHeaderField: upstreamSchemeHeader)
+        return request
     }
 
     public static func isProxyEnablementAllowed(isEnabled: Bool, serverURLString: String) -> Bool {

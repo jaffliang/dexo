@@ -100,10 +100,35 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
         urlProtocol.client?.urlProtocol(urlProtocol, didLoad: data)
     }
 
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Do not follow Location on this session (`protocolClasses = []`).
+        // Announce the redirect to the outer client (protocol + ForumRedirectHandler)
+        // with hop headers stripped so the next URL is rewritten again.
+        if DoHGatewayPolicy.relayFollowsHTTPRedirects {
+            completionHandler(newRequest)
+            return
+        }
+        guard let urlProtocol = owner(for: task) else {
+            completionHandler(nil)
+            return
+        }
+        let mapped = mappedResponse(response, original: urlProtocol.request)
+        let next = DoHGatewayPolicy.requestForOuterRedirect(newRequest)
+        urlProtocol.client?.urlProtocol(urlProtocol, wasRedirectedTo: next, redirectResponse: mapped)
+        cancel(urlProtocol)
+        completionHandler(nil)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let urlProtocol = owner(for: task) else { return }
         if let error {
-            urlProtocol.client?.urlProtocol(urlProtocol, didFailWithError: error)
+            urlProtocol.client?.urlProtocol(urlProtocol, didFailWithError: mappedRelayError(error))
         } else {
             urlProtocol.client?.urlProtocolDidFinishLoading(urlProtocol)
         }
@@ -114,6 +139,34 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
         lock.lock()
         defer { lock.unlock() }
         return protocols[task.taskIdentifier]
+    }
+
+    /// Relay only speaks HTTP to 127.0.0.1. An iOS SSL error here means the
+    /// inner session followed an https Location (visible SNI). Do not surface
+    /// that as `URLError.secureConnectionFailed`; gateway TLS failures stay
+    /// on the JSON 502 / `dexo_doh_gateway_last_error` path.
+    private func mappedRelayError(_ error: Error) -> Error {
+        let code = (error as? URLError)?.code
+        switch code {
+        case .secureConnectionFailed,
+             .serverCertificateUntrusted,
+             .serverCertificateHasBadDate,
+             .serverCertificateNotYetValid,
+             .clientCertificateRejected,
+             .clientCertificateRequired:
+            break
+        default:
+            return error
+        }
+        let text = DoHGatewayRuntime.shared.lastError
+            ?? "DoH gateway: inner relay refused a visible-SNI TLS hop"
+        return URLError(
+            .cannotConnectToHost,
+            userInfo: [
+                NSLocalizedDescriptionKey: text,
+                NSUnderlyingErrorKey: error,
+            ]
+        )
     }
 
     private func mappedResponse(_ response: URLResponse, original: URLRequest) -> URLResponse {

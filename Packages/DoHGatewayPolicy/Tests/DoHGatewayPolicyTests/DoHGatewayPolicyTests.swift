@@ -112,6 +112,37 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertEqual(rewritten.url?.path, "/session.json")
     }
 
+    func testRelayDoesNotFollowRedirectsAndPrivacyContextStaysOff() {
+        XCTAssertFalse(DoHGatewayPolicy.relayFollowsHTTPRedirects)
+        XCTAssertFalse(DoHGatewayPolicy.enablePrivacyContextWhileGatewayActive)
+    }
+
+    func testRedirectLocationStaysOnOriginalHTTPSHost() throws {
+        let location = try XCTUnwrap(URL(string: "https://linux.do/session/csrf"))
+        XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(location, configuration: active))
+        XCTAssertEqual(location.scheme, "https")
+        XCTAssertEqual(location.host, "linux.do")
+        XCTAssertFalse(DoHGatewayPolicy.isLoopbackHost(location.host ?? ""))
+    }
+
+    func testOuterRedirectRequestDropsGatewayHopHeaders() throws {
+        var redirected = URLRequest(url: try XCTUnwrap(URL(string: "https://linux.do/session/csrf")))
+        redirected.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.skipHeader)
+        redirected.setValue("linux.do", forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader)
+        redirected.setValue("443", forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader)
+        redirected.setValue("https", forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader)
+        redirected.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let next = DoHGatewayPolicy.requestForOuterRedirect(redirected)
+        XCTAssertEqual(next.url?.absoluteString, "https://linux.do/session/csrf")
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.skipHeader))
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader))
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader))
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader))
+        XCTAssertEqual(next.value(forHTTPHeaderField: "Accept"), "application/json")
+        XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(next, configuration: active))
+    }
+
     func testMaterializeHTTPBodyReadsStream() {
         let body = Data("token=abc".utf8)
         var request = URLRequest(url: URL(string: "https://linux.do/hcaptcha/create.json")!)

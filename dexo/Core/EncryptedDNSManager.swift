@@ -10,8 +10,6 @@ final class EncryptedDNSManager {
     // is the FluxDO-style path for URLSession/Alamofire on iOS 15.
     private let privacyContext = NWParameters.PrivacyContext.default
 
-    private var didInstallImageDownloader = false
-
     private init() {}
 
     /// Applies the persisted preference before any URLSession-backed clients
@@ -51,31 +49,45 @@ final class EncryptedDNSManager {
             WebViewDoHProxy.shared.stop()
         }
 
-        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURLString),
-              let serverURL = Self.normalizedServerURL(serverURLString)
-        else {
+        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURLString) else {
             privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
             privacyContext.flushCache()
             return false
         }
         installOnSharedImageDownloader()
 
-        let resolver = NWParameters.PrivacyContext.ResolverConfiguration.https(
-            serverURL,
-            serverAddresses: []
-        )
-        privacyContext.requireEncryptedNameResolution(true, fallbackResolver: resolver)
+        // iOS 15: the loopback gateway is the only ECH path. PrivacyContext
+        // encrypted DNS resolves via DoH then handshakes TLS with visible SNI.
+        // Any URLSession that misses the protocol (SDWebImage's already-built
+        // session, URLSession.shared, a race before canInit sees isProxyActive)
+        // would then fail with URLError.secureConnectionFailed. Keep it off so
+        // leaked requests fail closed instead of doing visible-SNI TLS.
+        if DoHGatewayPolicy.enablePrivacyContextWhileGatewayActive,
+           let serverURL = Self.normalizedServerURL(serverURLString)
+        {
+            let resolver = NWParameters.PrivacyContext.ResolverConfiguration.https(
+                serverURL,
+                serverAddresses: []
+            )
+            privacyContext.requireEncryptedNameResolution(true, fallbackResolver: resolver)
+        } else {
+            privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
+        }
         privacyContext.flushCache()
         return true
     }
 
+    /// Installs the gateway protocol on SDWebImage and drops any session that
+    /// was created before the protocol was in `protocolClasses`.
     private func installOnSharedImageDownloader() {
-        guard !didInstallImageDownloader else { return }
-        didInstallImageDownloader = true
         let downloader = SDWebImageDownloader.shared
-        let sessionConfiguration = downloader.config.sessionConfiguration ?? URLSessionConfiguration.default
+        let existing = downloader.config.sessionConfiguration ?? URLSessionConfiguration.default
+        guard let sessionConfiguration = existing.copy() as? URLSessionConfiguration else {
+            return
+        }
         DoHGatewayRuntime.prepare(sessionConfiguration)
         downloader.config.sessionConfiguration = sessionConfiguration
+        downloader.invalidateSessionAndCancel(false)
     }
 
     static func normalizedServerURL(_ input: String) -> URL? {
