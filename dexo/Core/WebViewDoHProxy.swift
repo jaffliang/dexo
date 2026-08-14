@@ -3,22 +3,23 @@ import Network
 import Security
 import WebKit
 
-/// Applies the app's global DoH preference to every production WKWebView on
-/// iOS 17 and later, regardless of the forum host. WebKit keeps the original
-/// HTTPS URL and connects through a loopback CONNECT proxy. The proxy
-/// terminates local TLS, while URLSession performs upstream TLS with the app's
-/// encrypted resolver configuration.
+/// Applies the app's global DoH preference to Cloudflare-clearance WKWebViews.
+/// WebKit keeps the original HTTPS URL and connects through a loopback CONNECT
+/// proxy. Forum hosts are MITM'd so upstream TLS can use the DoH/ECH gateway;
+/// Cloudflare Turnstile and hCaptcha stay end-to-end.
+///
+/// iOS 17+ uses public `ProxyConfiguration`. iOS 15/16 attach the same
+/// listener through WebKit's per-data-store HTTP proxy hooks (string
+/// selectors only) and keep one shared jar so `cf_clearance` still syncs.
 enum WebViewDoHConfigurator {
     static func configure(_ configuration: WKWebViewConfiguration) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-
         let dataStore = WKWebsiteDataStore.default()
         configuration.websiteDataStore = dataStore
-        dataStore.proxyConfigurations = []
+        clearProxy(on: dataStore)
 
         guard AppSettings.shared.dohEnabled else { return nil }
         let lease = try await WebViewDoHProxy.shared.acquire()
-        dataStore.proxyConfigurations = [lease.proxyConfiguration]
+        try apply(lease, to: configuration)
         return lease
     }
 
@@ -28,11 +29,17 @@ enum WebViewDoHConfigurator {
     static func configurePreservingDataStore(
         _ configuration: WKWebViewConfiguration
     ) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-        configuration.websiteDataStore.proxyConfigurations = []
+        clearProxy(on: configuration.websiteDataStore)
         guard AppSettings.shared.dohEnabled else { return nil }
         let lease = try await WebViewDoHProxy.shared.acquire()
-        configuration.websiteDataStore.proxyConfigurations = [lease.proxyConfiguration]
+        let original = configuration.websiteDataStore
+        try apply(lease, to: configuration)
+        if configuration.websiteDataStore !== original {
+            await transferCookies(from: original, to: configuration.websiteDataStore)
+            if original === WebCookieStore.shared.websiteDataStore {
+                WebCookieStore.shared.adoptWebsiteDataStore(configuration.websiteDataStore)
+            }
+        }
         return lease
     }
 
@@ -67,9 +74,43 @@ enum WebViewDoHConfigurator {
     }
 
     static func makeTrustEvaluator() -> WebViewProxyTrustEvaluator? {
-        guard #available(iOS 17.0, *) else { return nil }
         guard let certificateData = WebViewDoHProxy.shared.caCertificateData else { return nil }
         return WebViewProxyTrustEvaluator(certificateData: certificateData)
+    }
+
+    static func clearProxy(on dataStore: WKWebsiteDataStore) {
+        if #available(iOS 17.0, *) {
+            dataStore.proxyConfigurations = []
+        }
+        WebViewLegacyHTTPProxy.clear(dataStore)
+    }
+
+    private static func apply(
+        _ lease: WebViewDoHProxy.Lease,
+        to configuration: WKWebViewConfiguration
+    ) throws {
+        if #available(iOS 17.0, *) {
+            configuration.websiteDataStore.proxyConfigurations = [lease.proxyConfiguration]
+            return
+        }
+
+        // iOS 15/16: `_setProxyConfiguration` is not reliable on existing
+        // stores. Create (and reuse) one proxied `WKWebsiteDataStore` so
+        // challenge and password-login keep sharing a jar.
+        let store = try WebViewDoHProxy.shared.legacyProxiedDataStore(port: lease.port)
+        configuration.websiteDataStore = store
+    }
+
+    private static func transferCookies(from source: WKWebsiteDataStore, to destination: WKWebsiteDataStore) async {
+        guard source !== destination else { return }
+        let cookies = await withCheckedContinuation { cont in
+            source.httpCookieStore.getAllCookies { cont.resume(returning: $0) }
+        }
+        for cookie in cookies {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                destination.httpCookieStore.setCookie(cookie) { cont.resume() }
+            }
+        }
     }
 }
 
@@ -104,17 +145,25 @@ nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
     }
 }
 
-@available(iOS 17.0, *)
 final class WebViewDoHProxy {
     static let shared = WebViewDoHProxy()
 
     final class Lease {
         fileprivate let id: UUID
-        let proxyConfiguration: ProxyConfiguration
+        let port: UInt16
 
-        fileprivate init(id: UUID, proxyConfiguration: ProxyConfiguration) {
+        @available(iOS 17.0, *)
+        var proxyConfiguration: ProxyConfiguration {
+            let endpoint = NWEndpoint.hostPort(
+                host: .ipv4(.loopback),
+                port: NWEndpoint.Port(rawValue: port) ?? 443
+            )
+            return ProxyConfiguration(httpCONNECTProxy: endpoint)
+        }
+
+        fileprivate init(id: UUID, port: UInt16) {
             self.id = id
-            self.proxyConfiguration = proxyConfiguration
+            self.port = port
         }
 
         deinit {
@@ -138,6 +187,7 @@ final class WebViewDoHProxy {
     private var leases = Set<UUID>()
     private var debugCaptureLeases = Set<UUID>()
     private var tunnels: [UUID: WebViewDoHMITMTunnel] = [:]
+    private var cachedLegacyDataStore: WKWebsiteDataStore?
     private struct PendingAcquire {
         let isDebugCapture: Bool
         let continuation: CheckedContinuation<Lease, Error>
@@ -187,8 +237,26 @@ final class WebViewDoHProxy {
     }
 
     func stop() {
-        WKWebsiteDataStore.default().proxyConfigurations = []
+        if #available(iOS 17.0, *) {
+            WKWebsiteDataStore.default().proxyConfigurations = []
+        }
+        WebViewLegacyHTTPProxy.clear(WKWebsiteDataStore.default())
+        if let cachedLegacyDataStore {
+            WebViewLegacyHTTPProxy.clear(cachedLegacyDataStore)
+        }
+        cachedLegacyDataStore = nil
         stopListener(error: ProxyError.listenerStopped)
+    }
+
+    func legacyProxiedDataStore(port: UInt16) throws -> WKWebsiteDataStore {
+        if let cachedLegacyDataStore {
+            return cachedLegacyDataStore
+        }
+        guard let store = WebViewLegacyHTTPProxy.makeNonPersistentDataStore(port: port) else {
+            throw ProxyError.unavailablePort
+        }
+        cachedLegacyDataStore = store
+        return store
     }
 
     private func startListener() throws {
@@ -208,7 +276,9 @@ final class WebViewDoHProxy {
         )
 
         let listener = try NWListener(using: parameters, on: .any)
-        listener.newConnectionLimit = 128
+        if #available(iOS 16.0, *) {
+            listener.newConnectionLimit = 128
+        }
         self.listener = listener
 
         listener.stateUpdateHandler = { [weak self] state in
@@ -285,11 +355,7 @@ final class WebViewDoHProxy {
         if isDebugCapture {
             debugCaptureLeases.insert(id)
         }
-        let endpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
-        return Lease(
-            id: id,
-            proxyConfiguration: ProxyConfiguration(httpCONNECTProxy: endpoint)
-        )
+        return Lease(id: id, port: port.rawValue)
     }
 
     private func release(_ id: UUID) {

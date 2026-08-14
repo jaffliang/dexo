@@ -1,7 +1,6 @@
 import Foundation
 import Network
 
-@available(iOS 17.0, *)
 private nonisolated final class WebViewMITMRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
@@ -14,10 +13,10 @@ private nonisolated final class WebViewMITMRedirectDelegate: NSObject, URLSessio
     }
 }
 
-/// Receives HTTP/1.1 after the CONNECT framer has terminated local TLS and
-/// forwards each request with URLSession. The request URL, headers, response
-/// body, and WebKit origin are not rewritten.
-@available(iOS 17.0, *)
+/// Receives either decrypted HTTP/1.1 (MITM) or raw TLS (end-to-end) after
+/// the CONNECT preface. MITM requests are forwarded with a URLSession that
+/// uses the DoH gateway. Cloudflare / hCaptcha hosts are byte-copied so the
+/// widget keeps a real certificate and TLS fingerprint.
 nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
     private static let receiveBufferSize = 64 * 1024
     private static let hopByHopHeaders: Set<String> = [
@@ -44,6 +43,12 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
     private var isForwarding = false
     private var receivedBytes = 0
     private var sentBytes = 0
+    private var prefaceBuffer = Data()
+    private var didReadPreface = false
+    private var upstream: NWConnection?
+    private var isPlainTunnel = false
+    private var isReceivingFromClient = false
+    private var isReceivingFromUpstream = false
 
     init(
         id: UUID,
@@ -56,18 +61,26 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
         self.queue = queue
         self.onStop = onStop
 
+        session = URLSession(
+            configuration: Self.makeSessionConfiguration(),
+            delegate: redirectDelegate,
+            delegateQueue: nil
+        )
+    }
+
+    /// Ephemeral session that still hits the DoH/ECH loopback gateway. Cookies
+    /// stay in WKWebView; this session only carries the decrypted HTTP bytes.
+    static func makeSessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 120
-        session = URLSession(
-            configuration: configuration,
-            delegate: redirectDelegate,
-            delegateQueue: nil
-        )
+        DoHGatewayRuntime.prepare(configuration)
+        return configuration
     }
 
     func start() {
@@ -75,8 +88,8 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
             guard let self else { return }
             switch state {
             case .ready:
-                self.log("native TLS ready; waiting for decrypted HTTP")
-                self.receiveRequestBytes()
+                self.log("local connection ready; waiting for tunnel preface")
+                self.receivePrefaceBytes()
             case .waiting(let error):
                 self.log("local connection waiting: \(error)")
             case .failed(let error):
@@ -95,8 +108,171 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
         queue.async { [weak self] in self?.stop() }
     }
 
+    private func receivePrefaceBytes() {
+        guard !isStopped, !didReadPreface else { return }
+        if let parsed = WebViewDoHTunnelPolicy.splitPreface(prefaceBuffer) {
+            handlePreface(parsed.0, remainder: parsed.1)
+            return
+        }
+        if prefaceBuffer.count > 1_024 {
+            log("missing tunnel preface; treating bytes as MITM HTTP")
+            didReadPreface = true
+            do {
+                try parser.append(prefaceBuffer)
+            } catch {
+                handleParserError(error)
+                return
+            }
+            prefaceBuffer = Data()
+            receiveRequestBytes()
+            return
+        }
+
+        client.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveBufferSize) { [weak self] data, _, complete, error in
+            guard let self, !self.isStopped else { return }
+            guard error == nil else {
+                self.log("preface receive failed: \(String(describing: error))")
+                self.stop()
+                return
+            }
+            if let data, !data.isEmpty {
+                self.receivedBytes += data.count
+                self.prefaceBuffer.append(data)
+            }
+            if complete, WebViewDoHTunnelPolicy.splitPreface(self.prefaceBuffer) == nil {
+                self.stop()
+                return
+            }
+            self.receivePrefaceBytes()
+        }
+    }
+
+    private func handlePreface(_ preface: WebViewDoHTunnelPolicy.Preface, remainder: Data) {
+        didReadPreface = true
+        prefaceBuffer = Data()
+        log(
+            preface.usesEndToEndTLS
+                ? "end-to-end tunnel \(preface.host):\(preface.port)"
+                : "MITM HTTP \(preface.host):\(preface.port)"
+        )
+        if preface.usesEndToEndTLS {
+            startPlainTunnel(host: preface.host, port: preface.port, initialData: remainder)
+            return
+        }
+        if !remainder.isEmpty {
+            do {
+                try parser.append(remainder)
+            } catch {
+                handleParserError(error)
+                return
+            }
+        }
+        receiveRequestBytes()
+    }
+
+    private func startPlainTunnel(host: String, port: UInt16, initialData: Data) {
+        guard !isStopped else { return }
+        isPlainTunnel = true
+        let endpoint = NWEndpoint.hostPort(
+            host: .name(host, nil),
+            port: NWEndpoint.Port(rawValue: port) ?? 443
+        )
+        let upstream = NWConnection(to: endpoint, using: .tcp)
+        self.upstream = upstream
+        upstream.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.log("plain upstream ready \(host):\(port)")
+                if !initialData.isEmpty {
+                    self.sendPlain(initialData, to: upstream, then: { [weak self] in
+                        self?.receivePlainFromClient()
+                    })
+                } else {
+                    self.receivePlainFromClient()
+                }
+                self.receivePlainFromUpstream()
+            case .waiting(let error):
+                self.log("plain upstream waiting: \(error)")
+            case .failed(let error):
+                self.log("plain upstream failed: \(error)")
+                self.stop()
+            case .cancelled:
+                self.stop()
+            default:
+                break
+            }
+        }
+        upstream.start(queue: queue)
+    }
+
+    private func receivePlainFromClient() {
+        guard !isStopped, !isReceivingFromClient else { return }
+        isReceivingFromClient = true
+        client.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveBufferSize) { [weak self] data, _, complete, error in
+            guard let self, !self.isStopped else { return }
+            self.isReceivingFromClient = false
+            guard error == nil else {
+                self.stop()
+                return
+            }
+            if let data, !data.isEmpty {
+                self.receivedBytes += data.count
+                self.sendPlain(data, to: self.upstream, then: { [weak self] in
+                    if complete {
+                        self?.stop()
+                    } else {
+                        self?.receivePlainFromClient()
+                    }
+                })
+                return
+            }
+            complete ? self.stop() : self.receivePlainFromClient()
+        }
+    }
+
+    private func receivePlainFromUpstream() {
+        guard !isStopped, let upstream, !isReceivingFromUpstream else { return }
+        isReceivingFromUpstream = true
+        upstream.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveBufferSize) { [weak self] data, _, complete, error in
+            guard let self, !self.isStopped else { return }
+            self.isReceivingFromUpstream = false
+            guard error == nil else {
+                self.stop()
+                return
+            }
+            if let data, !data.isEmpty {
+                self.sendPlain(data, to: self.client, then: { [weak self] in
+                    if complete {
+                        self?.stop()
+                    } else {
+                        self?.receivePlainFromUpstream()
+                    }
+                })
+                return
+            }
+            complete ? self.stop() : self.receivePlainFromUpstream()
+        }
+    }
+
+    private func sendPlain(_ data: Data, to connection: NWConnection?, then completion: @escaping () -> Void) {
+        guard let connection else {
+            stop()
+            return
+        }
+        sentBytes += data.count
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self, !self.isStopped else { return }
+            if error != nil {
+                self.stop()
+                return
+            }
+            completion()
+        })
+    }
+
     private func receiveRequestBytes() {
-        guard !isStopped, !isForwarding else { return }
+        guard !isStopped, !isForwarding, !isPlainTunnel else { return }
         do {
             if let request = try parser.nextRequest() {
                 forward(request)
@@ -330,6 +506,9 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
         activeTask?.cancel()
         activeTask = nil
         session.invalidateAndCancel()
+        upstream?.stateUpdateHandler = nil
+        upstream?.cancel()
+        upstream = nil
         client.stateUpdateHandler = nil
         client.cancel()
         log("stopping; decrypted received=\(receivedBytes), sent=\(sentBytes)")

@@ -18,8 +18,23 @@ final class WebCookieStore {
     /// Long-lived WebKit jar shared by Cloudflare challenge and password-login
     /// WKWebViews. Copying `cf_clearance` into a fresh `.nonPersistent()` store
     /// does not preserve TLS/JA3, so both flows must use this instance.
+    /// iOS 15 DoH may replace this with a proxied store; challenge and
+    /// password-login still share that one instance.
     @MainActor
-    private(set) lazy var websiteDataStore: WKWebsiteDataStore = .nonPersistent()
+    private var websiteDataStoreStorage: WKWebsiteDataStore?
+
+    @MainActor
+    var websiteDataStore: WKWebsiteDataStore {
+        if let websiteDataStoreStorage { return websiteDataStoreStorage }
+        let store = WKWebsiteDataStore.nonPersistent()
+        websiteDataStoreStorage = store
+        return store
+    }
+
+    @MainActor
+    func adoptWebsiteDataStore(_ store: WKWebsiteDataStore) {
+        websiteDataStoreStorage = store
+    }
 
     private let userAgentPath: URL
 

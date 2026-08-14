@@ -364,11 +364,10 @@ private extension String {
 /// `createWebViewWith` must return a WKWebView synchronously.
 private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked Sendable {
     weak var owner: AuthenticatedWebViewController?
-    private let trustEvaluator: WebViewProxyTrustEvaluator?
+    private var trustEvaluator: WebViewProxyTrustEvaluator?
 
     init(owner: AuthenticatedWebViewController) {
         self.owner = owner
-        trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         super.init()
     }
 
@@ -377,6 +376,9 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if trustEvaluator == nil {
+            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+        }
         if let credential = trustEvaluator?.credential(for: challenge) {
             completionHandler(.useCredential, credential)
             return

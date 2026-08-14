@@ -304,13 +304,12 @@ final class WebLoginViewController: BaseViewController {
     private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         private let targetHost: String
         private let onCookiesReady: ([HTTPCookie]) -> Void
-        private let trustEvaluator: WebViewProxyTrustEvaluator?
+        private var trustEvaluator: WebViewProxyTrustEvaluator?
         private(set) var didCallback = false
 
         init(targetURL: URL, onCookiesReady: @escaping ([HTTPCookie]) -> Void) {
             self.targetHost = targetURL.host?.lowercased() ?? ""
             self.onCookiesReady = onCookiesReady
-            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         }
 
         func webView(
@@ -318,6 +317,9 @@ final class WebLoginViewController: BaseViewController {
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
+            if trustEvaluator == nil {
+                trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+            }
             if let credential = trustEvaluator?.credential(for: challenge) {
                 #if DEBUG
                 print("[WebViewDoHProxy] WebLogin accepted proxy CA for \(challenge.protectionSpace.host)")

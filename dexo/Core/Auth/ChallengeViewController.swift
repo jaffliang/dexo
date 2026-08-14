@@ -77,14 +77,55 @@ final class ChallengeViewController: BaseViewController {
         return (config, lease)
     }
 
-    private lazy var coordinator = Coordinator(onNavigationFinished: { [weak self] in
-        self?.syncCookies()
-    })
+    private lazy var coordinator = Coordinator(
+        onNavigationFinished: { [weak self] in
+            self?.hideLoadError()
+            self?.syncCookies()
+        },
+        onNavigationFailed: { [weak self] error in
+            self?.showLoadError(error)
+        }
+    )
 
     private lazy var progressView: UIProgressView = {
         let pv = UIProgressView(progressViewStyle: .bar)
         pv.translatesAutoresizingMaskIntoConstraints = false
         return pv
+    }()
+
+    private lazy var loadErrorView: UIView = {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.isHidden = true
+
+        let stack = UIStackView(arrangedSubviews: [loadErrorLabel, retryButton])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
+    }()
+
+    private lazy var loadErrorLabel: UILabel = {
+        let label = UILabel()
+        label.font = FontManager.shared.font(size: 15)
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    private lazy var retryButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle(String(localized: "action.retry"), for: .normal)
+        button.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
+        return button
     }()
 
     private var progressObservation: NSKeyValueObservation?
@@ -111,11 +152,17 @@ final class ChallengeViewController: BaseViewController {
         navigationItem.rightBarButtonItem?.isEnabled = false
 
         view.addSubview(progressView)
+        view.addSubview(loadErrorView)
         NSLayoutConstraint.activate([
             progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            loadErrorView.topAnchor.constraint(equalTo: progressView.bottomAnchor),
+            loadErrorView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            loadErrorView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            loadErrorView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        applyChallengeTheme()
 
         setupTask = Task { [weak self] in
             await self?.setUpWebView()
@@ -132,7 +179,7 @@ final class ChallengeViewController: BaseViewController {
             webView.navigationDelegate = coordinator
             webView.uiDelegate = coordinator
             webView.isOpaque = false
-            webView.backgroundColor = .systemBackground
+            webView.backgroundColor = ThemeManager.shared.backgroundColor
             if let userAgent {
                 webView.customUserAgent = userAgent
             }
@@ -165,11 +212,27 @@ final class ChallengeViewController: BaseViewController {
             guard !Task.isCancelled else { return }
             webView.configuration.websiteDataStore.httpCookieStore.add(coordinator)
             isObservingCookieChanges = true
+            hideLoadError()
             webView.load(URLRequest(url: targetURL))
         } catch {
             guard !Task.isCancelled else { return }
             showProxyUnavailableAlert()
         }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        applyChallengeTheme()
+    }
+
+    private func applyChallengeTheme() {
+        let theme = ThemeManager.shared
+        view.backgroundColor = theme.backgroundColor
+        loadErrorView.backgroundColor = theme.backgroundColor
+        loadErrorLabel.textColor = UIColor.secondaryLabel
+        retryButton.tintColor = theme.accentColor
+        webView?.backgroundColor = theme.backgroundColor
+        navigationController?.navigationBar.tintColor = theme.accentColor
     }
 
     private func showProxyUnavailableAlert() {
@@ -221,6 +284,29 @@ final class ChallengeViewController: BaseViewController {
         {
             WebCookieStore.shared.userAgent = evaluatedUserAgent
         }
+    }
+
+    @objc private func retryTapped() {
+        hideLoadError()
+        webView?.load(URLRequest(url: targetURL))
+    }
+
+    fileprivate func showLoadError(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        loadErrorLabel.text = String(
+            format: String(localized: "challenge.load_failed.message %@"),
+            error.localizedDescription
+        )
+        loadErrorView.isHidden = false
+        view.bringSubviewToFront(loadErrorView)
+        applyChallengeTheme()
+    }
+
+    private func hideLoadError() {
+        loadErrorView.isHidden = true
     }
 
     @objc private func cancelTapped() {
@@ -343,11 +429,15 @@ final class ChallengeViewController: BaseViewController {
 
     private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
         private let onNavigationFinished: () -> Void
-        private let trustEvaluator: WebViewProxyTrustEvaluator?
+        private let onNavigationFailed: (Error) -> Void
+        private var trustEvaluator: WebViewProxyTrustEvaluator?
 
-        init(onNavigationFinished: @escaping () -> Void) {
+        init(
+            onNavigationFinished: @escaping () -> Void,
+            onNavigationFailed: @escaping (Error) -> Void
+        ) {
             self.onNavigationFinished = onNavigationFinished
-            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+            self.onNavigationFailed = onNavigationFailed
         }
 
         func webView(
@@ -355,6 +445,9 @@ final class ChallengeViewController: BaseViewController {
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
+            if trustEvaluator == nil {
+                trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+            }
             if let credential = trustEvaluator?.credential(for: challenge) {
                 #if DEBUG
                 print("[WebViewDoHProxy] Challenge accepted proxy CA for \(challenge.protectionSpace.host)")
@@ -367,6 +460,18 @@ final class ChallengeViewController: BaseViewController {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             onNavigationFinished()
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onNavigationFailed(error)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            onNavigationFailed(error)
         }
 
         func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

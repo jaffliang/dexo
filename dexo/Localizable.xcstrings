@@ -1160,6 +1160,22 @@
         }
       }
     },
+    "challenge.load_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The challenge page could not be loaded.\n%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "验证页无法加载。\n%@"
+          }
+        }
+      }
+    },
     "compose.body.placeholder" : {
       "localizations" : {
         "en" : {

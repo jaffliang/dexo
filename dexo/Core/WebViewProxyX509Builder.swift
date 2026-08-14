@@ -1,7 +1,6 @@
 import Foundation
 import Security
 
-@available(iOS 17.0, *)
 nonisolated enum WebViewProxyX509Builder {
     enum BuilderError: Error {
         case invalidHost

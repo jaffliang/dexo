@@ -1,7 +1,6 @@
 import Foundation
 import Security
 
-@available(iOS 17.0, *)
 nonisolated final class WebViewProxyTLSIdentity: @unchecked Sendable {
     let host: String
     let networkIdentity: sec_identity_t
@@ -17,7 +16,6 @@ nonisolated final class WebViewProxyTLSIdentity: @unchecked Sendable {
 /// App-local certificate authority for the WKWebView DoH proxy. A leaf
 /// certificate with an exact SAN is generated and signed for every CONNECT
 /// hostname. Nothing is installed into the system trust store.
-@available(iOS 17.0, *)
 nonisolated final class WebViewProxyCertificateAuthority: @unchecked Sendable {
     enum AuthorityError: Error {
         case caPrivateKeyLookupFailed(OSStatus)

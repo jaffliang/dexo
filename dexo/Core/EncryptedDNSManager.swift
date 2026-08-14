@@ -85,11 +85,9 @@ final class EncryptedDNSManager {
         if !enabled {
             disablePrivacyContext()
         }
-        if #available(iOS 17.0, *) {
-            // Existing proxy sessions may keep resolved addresses and open
-            // connections, so changing the resolver must rebuild them.
-            WebViewDoHProxy.shared.stop()
-        }
+        // Existing proxy sessions may keep resolved addresses and open
+        // connections, so changing the resolver must rebuild them.
+        WebViewDoHProxy.shared.stop()
     }
 
     private func disablePrivacyContext() {

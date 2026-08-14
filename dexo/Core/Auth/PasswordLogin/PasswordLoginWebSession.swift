@@ -104,6 +104,7 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     /// During in-place CF interstitial, `window.open` must stay in this WebView
     /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
     var isChallengeMode = false
+    var trustEvaluator: WebViewProxyTrustEvaluator?
 
     init(session: PasswordLoginWebSession) {
         self.session = session
@@ -148,6 +149,13 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if trustEvaluator == nil {
+            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+        }
+        if let credential = trustEvaluator?.credential(for: challenge) {
+            completionHandler(.useCredential, credential)
+            return
+        }
         completionHandler(.performDefaultHandling, nil)
     }
 
@@ -193,6 +201,7 @@ final class PasswordLoginWebSession {
     private var clearancePollTask: Task<Void, Never>?
     private var navigationContinuation: CheckedContinuation<Void, Error>?
     private var originTimeoutTask: Task<Void, Never>?
+    private var proxyLease: AnyObject?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -205,11 +214,9 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // Skip DoH MITM so Cloudflare + hCaptcha stay on system DNS/TLS
-        // (no-op on iOS 15). Login API traffic uses URLSession instead.
-        if #available(iOS 17.0, *) {
-            wkConfig.websiteDataStore.proxyConfigurations = []
-        }
+        // Forum hosts go through the DoH CONNECT proxy (ECH). Cloudflare
+        // Turnstile and hCaptcha stay end-to-end TLS on that same proxy.
+        proxyLease = try await WebViewDoHConfigurator.configurePreservingDataStore(wkConfig)
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
         scriptBridge = bridge
@@ -230,6 +237,7 @@ final class PasswordLoginWebSession {
         ))
 
         let webDelegate = PasswordLoginWebViewDelegateBridge(session: self)
+        webDelegate.trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         self.webDelegate = webDelegate
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
@@ -339,8 +347,8 @@ final class PasswordLoginWebSession {
     }
 
     /// Loads this forum's Cloudflare interstitial in this session's WKWebView
-    /// (system DNS/TLS). `cf_clearance` is copied to the native jar before
-    /// URLSession csrf / session.json.
+    /// (DoH CONNECT proxy when enabled). `cf_clearance` is copied to the native
+    /// jar before URLSession csrf / session.json.
     /// Does not present a second `ChallengeViewController`. linux.do uses
     /// `/challenge`; idcflare uses `/login` because `/challenge` is 404.
     func runInPlaceCloudflareChallenge(url: URL) async throws {

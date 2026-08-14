@@ -2,7 +2,6 @@ import Foundation
 import Network
 import Security
 
-@available(iOS 17.0, *)
 nonisolated final class WebViewMITMFramerContext: NSObject, @unchecked Sendable {
     let certificateAuthority: WebViewProxyCertificateAuthority
 
@@ -12,9 +11,8 @@ nonisolated final class WebViewMITMFramerContext: NSObject, @unchecked Sendable 
 }
 
 /// Parses the plaintext HTTP CONNECT preface, replies with 200, and then
-/// dynamically inserts Apple's TLS protocol above this framer. Once ready,
-/// the application receives decrypted HTTP/1.1 bytes on the same connection.
-@available(iOS 17.0, *)
+/// either inserts Apple's TLS protocol (MITM) or passes the bytes through
+/// (end-to-end TLS for Cloudflare / hCaptcha widgets).
 nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @unchecked Sendable {
     static let label = "Dexo HTTP CONNECT MITM"
     static let definition = NWProtocolFramer.Definition(implementation: HTTPConnectMITMFramer.self)
@@ -25,6 +23,7 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
 
     private let context: WebViewMITMFramerContext?
     private var didUpgradeToTLS = false
+    private var didBecomePassThrough = false
 
     required init(framer: NWProtocolFramer.Instance) {
         context = framer.options[Self.contextKey] as? WebViewMITMFramerContext
@@ -41,7 +40,7 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
     }
 
     func handleInput(framer: NWProtocolFramer.Instance) -> Int {
-        if didUpgradeToTLS {
+        if didUpgradeToTLS || didBecomePassThrough {
             framer.passThroughInput()
             return 0
         }
@@ -73,9 +72,28 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
             return 0
         }
 
+        let usesEndToEndTLS = WebViewDoHTunnelPolicy.usesEndToEndTLS(host: request.host)
         #if DEBUG
-        print("[WebViewDoHProxy] CONNECT \(request.host):\(request.port); upgrading to native TLS")
+        print(
+            "[WebViewDoHProxy] CONNECT \(request.host):\(request.port); "
+                + (usesEndToEndTLS ? "end-to-end TLS" : "upgrading to native TLS")
+        )
         #endif
+
+        let preface = WebViewDoHTunnelPolicy.encodePreface(
+            .init(usesEndToEndTLS: usesEndToEndTLS, host: request.host, port: request.port)
+        )
+        let established = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
+
+        if usesEndToEndTLS {
+            framer.writeOutput(data: established)
+            didBecomePassThrough = true
+            framer.passThroughInput()
+            framer.passThroughOutput()
+            framer.markReady()
+            deliverPreface(preface, framer: framer)
+            return 0
+        }
 
         let identity: WebViewProxyTLSIdentity
         do {
@@ -101,12 +119,13 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
         sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
 
         do {
-            framer.writeOutput(data: Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
+            framer.writeOutput(data: established)
             try framer.prependApplicationProtocol(options: tlsOptions)
             didUpgradeToTLS = true
             framer.passThroughInput()
             framer.passThroughOutput()
             framer.markReady()
+            deliverPreface(preface, framer: framer)
         } catch {
             #if DEBUG
             print("[WebViewDoHProxy] failed to prepend native TLS: \(error)")
@@ -122,7 +141,7 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
         messageLength: Int,
         isComplete: Bool
     ) {
-        if didUpgradeToTLS {
+        if didUpgradeToTLS || didBecomePassThrough {
             framer.passThroughOutput()
         }
     }
@@ -134,6 +153,11 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
     }
 
     func cleanup(framer: NWProtocolFramer.Instance) {}
+
+    private func deliverPreface(_ preface: Data, framer: NWProtocolFramer.Instance) {
+        let message = NWProtocolFramer.Message(definition: Self.definition)
+        framer.deliverInput(data: preface, message: message, isComplete: false)
+    }
 
     private func fail(framer: NWProtocolFramer.Instance, statusCode: Int, reason: String) {
         let body = "\(statusCode) \(reason)\n"
