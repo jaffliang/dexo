@@ -326,13 +326,19 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
         XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
-        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com"))
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do/"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "linux.do"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com/"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "idcflare.com"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://www.idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://forum.idcflare.net"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://cdk.linux.do"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(url: URL(string: "https://cdk.linux.do/redeem")!))
         XCTAssertFalse(ForumPolicy.isLinuxDoFamily(baseURL: "https://example.com"))
@@ -353,7 +359,10 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertNil(ForumPolicy.cloudflareInterstitialURL(for: "https://example.com"))
 
         XCTAssertTrue(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "linux.do"))
         XCTAssertFalse(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://idcflare.com"))
+        XCTAssertEqual(ForumPolicy.host(fromBaseURL: "https://idcflare.com/"), "idcflare.com")
+        XCTAssertEqual(ForumPolicy.host(fromBaseURL: "idcflare.com"), "idcflare.com")
     }
 
     func testCloudflareChallengeWinsOverSuccessStatus() {

@@ -335,14 +335,15 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
             userTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: replyReferenceLabel.leadingAnchor, constant: -8),
             usernameLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
             usernameLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor),
-            replyReferenceLabel.trailingAnchor.constraint(equalTo: floorLabel.leadingAnchor, constant: -8),
+            replyReferenceLabel.trailingAnchor.constraint(equalTo: unreadTimingDot.leadingAnchor, constant: -8),
             replyReferenceLabel.centerYAnchor.constraint(equalTo: floorLabel.centerYAnchor),
             timeLabel.trailingAnchor.constraint(equalTo: floorLabel.trailingAnchor),
             timeLabel.topAnchor.constraint(equalTo: floorLabel.bottomAnchor, constant: 2),
             floorLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             floorLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            unreadTimingDot.trailingAnchor.constraint(equalTo: timeLabel.trailingAnchor, constant: 6),
-            unreadTimingDot.topAnchor.constraint(equalTo: timeLabel.topAnchor, constant: -2),
+            unreadTimingDot.trailingAnchor.constraint(equalTo: floorLabel.leadingAnchor, constant: -6),
+            unreadTimingDot.centerYAnchor.constraint(equalTo: floorLabel.centerYAnchor),
+            unreadTimingDot.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -8),
         ])
     }
 

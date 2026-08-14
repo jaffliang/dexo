@@ -1,9 +1,9 @@
 import UIKit
 
-/// FluxDO-style unread indicator: a 6×6 pt primary circle with a 1pt
-/// surface border, pinned to the top-right of the post timestamp.
+/// Unread indicator: an 8×8 pt systemBlue circle with a 1pt surface border,
+/// pinned inside the header (leading side of the floor label).
 final class ReadTimingUnreadDot: UIView {
-    static let size: CGFloat = 6
+    static let size: CGFloat = 8
     static let fadeDuration: TimeInterval = 0.5
 
     override init(frame: CGRect) {
@@ -28,7 +28,7 @@ final class ReadTimingUnreadDot: UIView {
     }
 
     func apply(showsDot: Bool, animated: Bool) {
-        backgroundColor = ThemeManager.shared.accentColor
+        backgroundColor = .systemBlue
         layer.borderColor = ThemeManager.shared.cardBackgroundColor.cgColor
         layer.borderWidth = 1
         isAccessibilityElement = showsDot

@@ -105,6 +105,8 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private var pendingReadFlush: DispatchWorkItem?
     private var isFlushingReadTimings = false
     private var hasPendingReadFlush = false
+    private var didWarnUnauthenticatedReadTimings = false
+    private var readTimingsBannerHideWork: DispatchWorkItem?
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
     private static let readTickInterval: TimeInterval = 1
@@ -128,6 +130,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         view.showsVerticalScrollIndicator = false
         view.delegate = self
         view.prefetchDataSource = self
+        view.clipsToBounds = false
         view.register(VirtualTopicTitleCell.self, forCellWithReuseIdentifier: VirtualTopicTitleCell.reuseIdentifier)
         view.register(VirtualPostHeaderCell.self, forCellWithReuseIdentifier: VirtualPostHeaderCell.reuseIdentifier)
         view.register(VirtualPostBlockCell.self, forCellWithReuseIdentifier: VirtualPostBlockCell.reuseIdentifier)
@@ -402,6 +405,21 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     private let challengeButton = GuestChallengeUI.makePassButton()
 
+    private let readTimingsBanner: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = FontManager.shared.font(size: 13, weight: .medium)
+        label.textColor = .white
+        label.textAlignment = .center
+        label.numberOfLines = 2
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        label.layer.cornerRadius = 8
+        label.clipsToBounds = true
+        label.alpha = 0
+        label.isHidden = true
+        return label
+    }()
+
     private let topLoadingBar: UIView = {
         let bar = UIView()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -482,6 +500,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         view.addSubview(topLoadingBar)
         view.addSubview(jumpOverlay)
         view.addSubview(bottomBar)
+        view.addSubview(readTimingsBanner)
         view.addSubview(floatingReplyButton)
         floatingReplyButton.addTarget(self, action: #selector(floatingReplyTapped), for: .touchUpInside)
         challengeButton.addTarget(self, action: #selector(challengeTapped), for: .touchUpInside)
@@ -507,6 +526,11 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
             jumpOverlay.bottomAnchor.constraint(equalTo: collectionView.bottomAnchor),
             bottomBar.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            readTimingsBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            readTimingsBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            readTimingsBanner.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            readTimingsBanner.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
+            readTimingsBanner.heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
         ])
         collectionView.contentInset.bottom = 68
         updateTreeModeControls()
@@ -515,6 +539,12 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         NotificationCenter.default.addObserver(self, selector: #selector(renderEnvironmentChanged), name: FontManager.fontDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(readTimingsStatusDidChange(_:)),
+            name: .readTimingsStatusDidChange,
+            object: api
+        )
         Task { await initialLoad() }
         Task {
             await api.loadOrFetchEmojiMap()
@@ -524,6 +554,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        didWarnUnauthenticatedReadTimings = false
         resumeReadTracking()
         startReadFlushTimer()
         startReadTickTimer()
@@ -826,9 +857,14 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     }
 
     private func flushReadTimings() {
-        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
-              AuthManager.shared.isAuthenticated(for: api.baseURL)
-        else { return }
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL) else { return }
+        guard AuthManager.shared.isAuthenticated(for: api.baseURL) else {
+            if !didWarnUnauthenticatedReadTimings {
+                didWarnUnauthenticatedReadTimings = true
+                showReadTimingsBanner(String(localized: "read_timings.banner.not_logged_in"))
+            }
+            return
+        }
         if isFlushingReadTimings {
             hasPendingReadFlush = true
             return
@@ -884,6 +920,39 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         guard hasPendingReadFlush else { return }
         hasPendingReadFlush = false
         flushReadTimings()
+    }
+
+    @objc private func readTimingsStatusDidChange(_ notification: Notification) {
+        guard let status = notification.userInfo?["status"] as? ReadTimingUserStatus else { return }
+        switch status {
+        case .succeeded:
+            showReadTimingsBanner(String(localized: "read_timings.banner.succeeded"))
+        case .failed(let summary):
+            showReadTimingsBanner(String(localized: "read_timings.banner.failed \(summary)"))
+        case .retrying(let delay, _):
+            showReadTimingsBanner(String(localized: "read_timings.banner.retrying \(Int(delay))"))
+        case .idle:
+            break
+        }
+    }
+
+    private func showReadTimingsBanner(_ text: String) {
+        readTimingsBannerHideWork?.cancel()
+        readTimingsBanner.text = "  \(text)  "
+        readTimingsBanner.isHidden = false
+        UIView.animate(withDuration: 0.2) {
+            self.readTimingsBanner.alpha = 1
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            UIView.animate(withDuration: 0.25, animations: {
+                self.readTimingsBanner.alpha = 0
+            }, completion: { _ in
+                self.readTimingsBanner.isHidden = true
+            })
+        }
+        readTimingsBannerHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     private func handleLoadErrorIfNeeded() {

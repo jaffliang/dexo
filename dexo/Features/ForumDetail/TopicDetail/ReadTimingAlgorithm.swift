@@ -66,10 +66,10 @@ enum ReadTimingUserStatus: Equatable, Sendable {
 }
 
 extension ForumPolicy {
-    /// Unread-dot chrome follows linux.do family (linux.do + idcflare) and
-    /// the existing per-host tracking switch. linux.do stays opt-in;
-    /// idcflare stays always-on and is not gated by `usesLinuxDoReadTimingsGuard`.
+    /// Unread-dot chrome follows tracking, not the CF/login family set.
+    /// linux.do stays behind `linuxDoReadTimingsEnabled`; every other forum
+    /// (including idcflare) is on by default.
     static func showsReadTimingUnreadDot(baseURL: String) -> Bool {
-        isLinuxDoFamily(baseURL: baseURL) && tracksReadTimings(baseURL: baseURL)
+        tracksReadTimings(baseURL: baseURL)
     }
 }

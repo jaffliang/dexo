@@ -6385,6 +6385,70 @@
         }
       }
     },
+    "read_timings.banner.failed %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read-time report failed: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阅读时间上报失败：%@"
+          }
+        }
+      }
+    },
+    "read_timings.banner.not_logged_in" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to report read time"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未登录，无法上报阅读时间"
+          }
+        }
+      }
+    },
+    "read_timings.banner.retrying %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retrying read-time report in %lld seconds"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阅读时间上报将在 %lld 秒后重试"
+          }
+        }
+      }
+    },
+    "read_timings.banner.succeeded" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read time reported"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阅读时间已上报"
+          }
+        }
+      }
+    },
     "read_timings.unread_dot" : {
       "localizations" : {
         "en" : {
