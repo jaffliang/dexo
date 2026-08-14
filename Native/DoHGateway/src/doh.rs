@@ -101,10 +101,8 @@ impl DohResolver {
             combined.ipv6.clear();
         }
 
-        combined.ipv4.sort();
-        combined.ipv4.dedup();
-        combined.ipv6.sort();
-        combined.ipv6.dedup();
+        combined.ipv4 = unique_preserve(combined.ipv4);
+        combined.ipv6 = unique_preserve(combined.ipv6);
         if combined.ipv4.is_empty() && combined.ipv6.is_empty() {
             return Err("DoH returned no addresses".into());
         }
@@ -194,6 +192,16 @@ impl DohResolver {
         }
         Ok(body)
     }
+}
+
+fn unique_preserve<T: PartialEq>(items: Vec<T>) -> Vec<T> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 fn tracing_log(message: &str) {

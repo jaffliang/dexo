@@ -1,7 +1,7 @@
 //! Loopback HTTP/1.1 gateway. The iOS client talks plaintext HTTP to
 //! 127.0.0.1; this process opens the real outbound TLS session.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,13 +100,22 @@ impl Gateway {
             .iter()
             .filter_map(|record| record.ech_config.clone())
             .next();
-        let ech_present = ech_config.is_some();
+        let hints = ipv4_hints(&lookup);
 
-        let mut last_ipv4_error = None;
+        let mut tried = Vec::new();
+        let mut last_visible = None;
         let mut last_error = "all upstream addresses failed".to_string();
         for ip in addresses {
             let addr = SocketAddr::new(ip, upstream.port);
-            match self.forward(&request, &upstream, addr, ech_config.as_deref()).await {
+            tried.push(ip);
+            let use_ech = should_use_ech(ip, &hints, ech_config.is_some());
+            let ech_for_ip = if use_ech {
+                ech_config.as_deref()
+            } else {
+                None
+            };
+            match self.forward(&request, &upstream, addr, ech_for_ip).await
+            {
                 Ok(response) => {
                     eprintln!(
                         "[DoHGateway] {} {} -> {} ({}) ech={}",
@@ -114,7 +123,7 @@ impl Gateway {
                         upstream.host,
                         addr,
                         lookup_summary(&lookup),
-                        ech_present && response.1
+                        use_ech && response.1
                     );
                     client
                         .write_all(&response.0)
@@ -123,22 +132,20 @@ impl Gateway {
                     return Ok(());
                 }
                 Err(error) => {
-                    let formatted = format_attempt_error(addr, ech_present, &error);
-                    if addr.is_ipv4() {
-                        last_ipv4_error = Some(formatted.clone());
+                    let visible = format_attempt_error(addr, false, &error.message);
+                    if error.after_visible_sni {
+                        last_visible = Some(visible.clone());
                     }
-                    if addr.is_ipv4() || last_ipv4_error.is_none() {
-                        last_error = formatted;
-                    }
+                    last_error = if error.after_visible_sni {
+                        visible
+                    } else {
+                        format_attempt_error(addr, use_ech, &error.message)
+                    };
                 }
             }
         }
-        write_error(
-            &mut client,
-            502,
-            last_ipv4_error.as_deref().unwrap_or(&last_error),
-        )
-        .await
+        let report = last_visible.unwrap_or(last_error);
+        write_error(&mut client, 502, &append_tried_ips(&report, &tried)).await
     }
 
     async fn forward(
@@ -147,38 +154,53 @@ impl Gateway {
         upstream: &Upstream,
         addr: SocketAddr,
         ech_config: Option<&[u8]>,
-    ) -> Result<(Vec<u8>, bool), String> {
+    ) -> Result<(Vec<u8>, bool), AttemptError> {
         if let Some(config) = ech_config {
-            let stream = connect_tcp(addr).await?;
-            match tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                self.tls.connect(&upstream.host, stream, Some(config)),
-            )
-            .await
-            {
-                Ok(Ok((tls, true))) => {
-                    let bytes = proxy_http(tls, request, upstream).await?;
-                    return Ok((bytes, true));
-                }
-                Ok(Ok((tls, false))) => {
-                    let bytes = proxy_http(tls, request, upstream).await?;
-                    return Ok((bytes, false));
-                }
-                Ok(Err(error)) => {
+            match self.try_ech(request, upstream, addr, config).await {
+                Ok(bytes) => return Ok((bytes, true)),
+                Err(error) => {
                     eprintln!(
-                        "[DoHGateway] ECH handshake {addr} failed ({error}); visible SNI fallback ≤2s"
+                        "[DoHGateway] ECH {addr} failed ({error}); visible SNI fallback ≤2s"
                     );
-                }
-                Err(_) => {
-                    eprintln!(
-                        "[DoHGateway] ECH handshake {addr} timed out; visible SNI fallback ≤2s"
-                    );
-                    // Keep going to the short visible-SNI retry; if that also
-                    // dies, format_attempt_error reports "TLS timeout".
                 }
             }
         }
 
+        match self.try_visible_sni(request, upstream, addr).await {
+            Ok(bytes) => Ok((bytes, false)),
+            Err(message) => Err(AttemptError {
+                message,
+                after_visible_sni: true,
+            }),
+        }
+    }
+
+    async fn try_ech(
+        &self,
+        request: &ParsedRequest,
+        upstream: &Upstream,
+        addr: SocketAddr,
+        config: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let stream = connect_tcp(addr).await?;
+        let (tls, used_ech) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            self.tls.connect(&upstream.host, stream, Some(config)),
+        )
+        .await
+        .map_err(|_| "TLS timeout".to_string())??;
+        if !used_ech {
+            return Err("ECH config unused".into());
+        }
+        proxy_http(tls, request, upstream).await
+    }
+
+    async fn try_visible_sni(
+        &self,
+        request: &ParsedRequest,
+        upstream: &Upstream,
+        addr: SocketAddr,
+    ) -> Result<Vec<u8>, String> {
         let stream = connect_tcp_within(addr, VISIBLE_SNI_TIMEOUT).await?;
         let tls = tokio::time::timeout(
             VISIBLE_SNI_TIMEOUT,
@@ -186,9 +208,13 @@ impl Gateway {
         )
         .await
         .map_err(|_| "TLS timeout".to_string())??;
-        let bytes = proxy_http(tls, request, upstream).await?;
-        Ok((bytes, false))
+        proxy_http(tls, request, upstream).await
     }
+}
+
+struct AttemptError {
+    message: String,
+    after_visible_sni: bool,
 }
 
 async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
@@ -218,6 +244,8 @@ fn format_attempt_error(addr: SocketAddr, ech_present: bool, error: &str) -> Str
     let ech = if ech_present { "yes" } else { "no" };
     let detail = if is_no_route_text(error) {
         "No route to host"
+    } else if is_reset_text(error) {
+        "connection reset"
     } else if error.contains("connect timeout") {
         "connect timeout"
     } else if error.contains("timeout") || error.contains("timed out") {
@@ -226,6 +254,23 @@ fn format_attempt_error(addr: SocketAddr, ech_present: bool, error: &str) -> Str
         error
     };
     format!("{family} {} ech={ech} {detail}", addr.ip())
+}
+
+fn is_reset_text(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("reset") || lower.contains("os error 54")
+}
+
+fn append_tried_ips(message: &str, tried: &[IpAddr]) -> String {
+    if tried.is_empty() {
+        return message.to_string();
+    }
+    let ips = tried
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{message} ips={ips}")
 }
 
 fn is_no_route_text(error: &str) -> bool {
@@ -398,21 +443,87 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<std::net::IpAddr> {
-    if !lookup.ipv4.is_empty() {
-        return lookup
-            .ipv4
-            .iter()
-            .copied()
-            .map(std::net::IpAddr::V4)
-            .collect();
+fn ipv4_hints(lookup: &crate::dns::Lookup) -> Vec<Ipv4Addr> {
+    let mut hints = Vec::new();
+    for record in &lookup.https {
+        for ip in &record.ipv4hint {
+            if !hints.contains(ip) {
+                hints.push(*ip);
+            }
+        }
     }
-    lookup
-        .ipv6
-        .iter()
-        .copied()
-        .map(std::net::IpAddr::V6)
-        .collect()
+    hints
+}
+
+fn should_use_ech(ip: IpAddr, hints: &[Ipv4Addr], ech_present: bool) -> bool {
+    if !ech_present {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => hints.contains(&v4) || is_cloudflare_ipv4(v4),
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// Cloudflare published IPv4 ranges (anycast edges). Used so ECH is only
+/// offered to IPs that can terminate `cloudflare-ech.com`.
+fn is_cloudflare_ipv4(ip: Ipv4Addr) -> bool {
+    const RANGES: &[(u32, u32)] = &[
+        (0x6810_0000, 12), // 104.16.0.0/12
+        (0xAC40_0000, 13), // 172.64.0.0/13
+        (0xA29E_0000, 15), // 162.158.0.0/15
+        (0xBC72_6000, 19), // 188.114.96.0/19
+        (0x6715_F400, 22), // 103.21.244.0/22
+        (0x6716_C800, 22), // 103.22.200.0/22
+        (0x671F_0400, 22), // 103.31.4.0/22
+        (0x8D65_4000, 18), // 141.101.64.0/18
+        (0x6CA2_C000, 18), // 108.162.192.0/18
+        (0xBE5D_F000, 20), // 190.93.240.0/20
+        (0xC5EA_F000, 22), // 197.234.240.0/22
+        (0xC629_8000, 17), // 198.41.128.0/17
+        (0xADF5_3000, 20), // 173.245.48.0/20
+        (0x8300_4800, 22), // 131.0.72.0/22
+    ];
+    let bits = u32::from(ip);
+    RANGES.iter().any(|(network, prefix)| {
+        let shift = 32 - prefix;
+        bits >> shift == network >> shift
+    })
+}
+
+fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<IpAddr> {
+    let hints = ipv4_hints(lookup);
+    let mut preferred = Vec::new();
+    let mut other_cf = Vec::new();
+    let mut rest = Vec::new();
+
+    for hint in &hints {
+        if !preferred.contains(hint) {
+            preferred.push(*hint);
+        }
+    }
+    for ip in &lookup.ipv4 {
+        if preferred.contains(ip) {
+            continue;
+        }
+        if is_cloudflare_ipv4(*ip) {
+            if !other_cf.contains(ip) {
+                other_cf.push(*ip);
+            }
+        } else if !rest.contains(ip) {
+            rest.push(*ip);
+        }
+    }
+
+    let mut ipv4 = preferred;
+    ipv4.extend(other_cf);
+    if ipv4.is_empty() {
+        ipv4.extend(rest);
+    }
+    if !ipv4.is_empty() {
+        return ipv4.into_iter().map(IpAddr::V4).collect();
+    }
+    lookup.ipv6.iter().copied().map(IpAddr::V6).collect()
 }
 
 fn lookup_summary(lookup: &crate::dns::Lookup) -> String {
@@ -662,6 +773,54 @@ mod tests {
         assert!(addresses[0].is_ipv6());
     }
 
+    fn linux_do_lookup_with_poisoned_a() -> crate::dns::Lookup {
+        crate::dns::Lookup {
+            ipv4: vec![
+                "177.71.1.10".parse().unwrap(),
+                "104.20.16.234".parse().unwrap(),
+                "172.66.166.61".parse().unwrap(),
+            ],
+            ipv6: Vec::new(),
+            https: vec![crate::dns::HttpsRecord {
+                priority: 1,
+                target: String::new(),
+                ipv4hint: vec![
+                    "104.20.16.234".parse().unwrap(),
+                    "172.66.166.61".parse().unwrap(),
+                ],
+                ech_config: Some(vec![0x00, 0x45]),
+            }],
+        }
+    }
+
+    #[test]
+    fn hints_and_cf_ips_come_before_and_drop_177() {
+        let addresses = ordered_addresses(&linux_do_lookup_with_poisoned_a());
+        assert_eq!(
+            addresses,
+            vec![
+                "104.20.16.234".parse::<IpAddr>().unwrap(),
+                "172.66.166.61".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        assert!(!addresses.iter().any(|ip| ip.to_string().starts_with("177.")));
+    }
+
+    #[test]
+    fn ech_only_for_hint_or_cloudflare_ips() {
+        let hints = vec![
+            Ipv4Addr::new(104, 20, 16, 234),
+            Ipv4Addr::new(172, 66, 166, 61),
+        ];
+        assert!(should_use_ech("104.20.16.234".parse().unwrap(), &hints, true));
+        assert!(should_use_ech("172.66.166.61".parse().unwrap(), &hints, true));
+        assert!(!should_use_ech("177.71.1.10".parse().unwrap(), &hints, true));
+        assert!(!should_use_ech("104.20.16.234".parse().unwrap(), &hints, false));
+        assert!(is_cloudflare_ipv4(Ipv4Addr::new(104, 20, 16, 234)));
+        assert!(is_cloudflare_ipv4(Ipv4Addr::new(172, 66, 166, 61)));
+        assert!(!is_cloudflare_ipv4(Ipv4Addr::new(177, 71, 1, 10)));
+    }
+
     #[test]
     fn attempt_error_names_family_ech_and_tls_timeout() {
         let addr: SocketAddr = "104.20.16.234:443".parse().unwrap();
@@ -673,6 +832,20 @@ mod tests {
         assert_eq!(
             format_attempt_error(v6, true, "connect [2606:4700:10::6814:10ea]:443 No route to host (os error 65)"),
             "IPv6 2606:4700:10::6814:10ea ech=yes No route to host"
+        );
+        assert_eq!(
+            format_attempt_error(addr, false, "Connection reset by peer (os error 54)"),
+            "IPv4 104.20.16.234 ech=no connection reset"
+        );
+        assert_eq!(
+            append_tried_ips(
+                "IPv4 104.20.16.234 ech=no connection reset",
+                &[
+                    "104.20.16.234".parse::<IpAddr>().unwrap(),
+                    "172.66.166.61".parse::<IpAddr>().unwrap(),
+                ]
+            ),
+            "IPv4 104.20.16.234 ech=no connection reset ips=104.20.16.234,172.66.166.61"
         );
     }
 }
