@@ -270,6 +270,8 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
     private var flairWidthConstraint: NSLayoutConstraint!
     private var flairHeightConstraint: NSLayoutConstraint!
     private var username: String?
+    private(set) var trackedPostId: Int?
+    private(set) var trackedPostNumber: Int?
     var onAvatar: ((String) -> Void)?
     var onReplyReference: (() -> Void)?
 
@@ -356,6 +358,8 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
     ) {
         backgroundColor = ThemeManager.shared.cardBackgroundColor
         contentView.backgroundColor = ThemeManager.shared.cardBackgroundColor
+        trackedPostId = post.id
+        trackedPostNumber = post.postNumber
         username = post.username
         let avatarSize = FontManager.shared.scaled(32)
         let flairSize = FontManager.shared.scaled(14)
@@ -491,6 +495,8 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         replyReferenceLabel.attributedText = nil
         replyReferenceLabel.isHidden = true
         unreadTimingDot.apply(showsDot: false, animated: false)
+        trackedPostId = nil
+        trackedPostNumber = nil
         onAvatar = nil
         onReplyReference = nil
     }

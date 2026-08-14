@@ -717,30 +717,36 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         refreshVisibleUnreadDots(animated: false)
     }
 
-    /// Do not rely only on `willDisplay`: custom layouts can skip it until the
-    /// first scroll, which left stared-at posts untracked and their dots stuck.
+    /// Reconcile from cells and layout frames that are actually on screen.
+    /// Custom timeline layout + snapshot/height commits can fire extra
+    /// `didEndDisplaying` without a matching `willDisplay`, and
+    /// `indexPathsForVisibleItems` can be stale — do not trust those alone.
     private func syncVisibleReadTracking() {
-        var postIds = Set<Int>()
-        func track(item: VirtualTopicItem) {
-            guard let postId = postIdByItem[item],
-                  postIds.insert(postId).inserted,
-                  let post = viewModel.postsById[postId]
-            else { return }
+        for postId in onScreenPostIDs() {
+            guard let post = viewModel.postsById[postId] else { continue }
             prepareReadTracking(for: post)
             readTracker.recordVisible(postNumber: post.postNumber)
         }
-        for indexPath in collectionView.indexPathsForVisibleItems {
-            if let item = dataSource.itemIdentifier(for: indexPath) {
-                track(item: item)
-            }
-        }
+    }
+
+    private func onScreenPostIDs() -> Set<Int> {
+        var postIds = Set<Int>()
         for cell in collectionView.visibleCells {
-            if let indexPath = collectionView.indexPath(for: cell),
-               let item = dataSource.itemIdentifier(for: indexPath)
-            {
-                track(item: item)
+            if let header = cell as? VirtualPostHeaderCell, let postId = header.trackedPostId {
+                postIds.insert(postId)
+            } else if let provider = cell as? TopicPostIDProviding, provider.renderedPostId != 0 {
+                postIds.insert(provider.renderedPostId)
             }
         }
+        let visibleRect = collectionView.bounds
+        for attributes in collectionView.collectionViewLayout.layoutAttributesForElements(in: visibleRect) ?? [] {
+            if let item = dataSource.itemIdentifier(for: attributes.indexPath),
+               let postId = postIdByItem[item]
+            {
+                postIds.insert(postId)
+            }
+        }
+        return postIds
     }
 
     private func prepareReadTracking(for post: DiscourseTopicDetail.Post) {
@@ -759,35 +765,12 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     private func refreshVisibleUnreadDots(animated: Bool) {
         guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL) else { return }
-        var refreshed = Set<VirtualTopicItem>()
-        func applyDot(to header: VirtualPostHeaderCell, item: VirtualTopicItem) {
-            guard case .header(let postId) = item,
-                  let post = viewModel.postsById[postId]
-            else { return }
-            header.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
-            refreshed.insert(item)
-        }
         for cell in collectionView.visibleCells {
             guard let header = cell as? VirtualPostHeaderCell,
-                  let indexPath = collectionView.indexPath(for: header),
-                  let item = dataSource.itemIdentifier(for: indexPath)
+                  let postId = header.trackedPostId,
+                  let post = viewModel.postsById[postId]
             else { continue }
-            applyDot(to: header, item: item)
-        }
-        var headersToReconfigure: [IndexPath] = []
-        for indexPath in collectionView.indexPathsForVisibleItems {
-            guard let item = dataSource.itemIdentifier(for: indexPath),
-                  case .header = item,
-                  !refreshed.contains(item)
-            else { continue }
-            if let header = collectionView.cellForItem(at: indexPath) as? VirtualPostHeaderCell {
-                applyDot(to: header, item: item)
-            } else {
-                headersToReconfigure.append(indexPath)
-            }
-        }
-        if !headersToReconfigure.isEmpty {
-            collectionView.reconfigureItems(at: headersToReconfigure)
+            header.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
         }
     }
 
@@ -1761,6 +1744,7 @@ extension VirtualizedTopicDetailViewController: RenderUnitSizeInvalidating {
         {
             collectionView.contentOffset.y = attributes.frame.minY - anchor.1
         }
+        syncVisibleReadTracking()
     }
 }
 
@@ -1806,6 +1790,11 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
         let next = max(0, visibleItemCountsByPost[postId, default: 1] - 1)
         visibleItemCountsByPost[postId] = next
         if next == 0, let post = viewModel.postsById[postId] {
+            if onScreenPostIDs().contains(postId) {
+                visibleItemCountsByPost[postId] = 1
+                readTracker.recordVisible(postNumber: post.postNumber)
+                return
+            }
             readTracker.recordHidden(postNumber: post.postNumber)
         }
     }

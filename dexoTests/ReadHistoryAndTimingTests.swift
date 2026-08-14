@@ -443,6 +443,24 @@ final class ReadTimingAlgorithmTests: XCTestCase {
         XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
     }
 
+    func testSpuriousHideThenOnScreenReconcileStillRushes() {
+        let clock = ManualReadTimingClock(time: 10)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 1)
+        tracker.recordHidden(postNumber: 1)
+        XCTAssertFalse(tracker.shouldRushFlush())
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+
+        tracker.recordVisible(postNumber: 1)
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+        _ = tracker.snapshotDelta()
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        tracker.commitSend()
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+    }
+
     func testPeriodicFlushWaitsSixtySecondsAfterASend() {
         let clock = ManualReadTimingClock(time: 0)
         let tracker = TopicReadTracker(now: { clock.time })
