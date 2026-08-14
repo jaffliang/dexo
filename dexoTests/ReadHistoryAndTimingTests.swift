@@ -99,6 +99,56 @@ final class ReadHistoryDatabaseTests: XCTestCase {
         }
     }
 
+    func testTimingReportPersistsWithoutPreferredForumIdKeyedByBaseURL() throws {
+        try withDatabase { database in
+            let forumId = TopicTimingReportPersistence.resolvedForumId(
+                preferred: nil,
+                baseURL: "https://idcflare.com",
+                forums: []
+            )
+            XCTAssertEqual(forumId, TopicTimingReportPersistence.unresolvedForumId)
+
+            var report = TopicTimingReport(
+                id: nil,
+                forumId: forumId,
+                baseURL: "https://idcflare.com",
+                accountName: "jeff",
+                topicId: 99,
+                attemptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                topicTime: 1_000,
+                postCount: 1,
+                visibleTime: 900,
+                requestDuration: 20,
+                statusCode: 403,
+                outcome: .failure,
+                consecutiveFailureCount: 1,
+                trippedBreaker: false,
+                errorSummary: "HTTP 403"
+            )
+            try database.saveTopicTimingReport(&report)
+
+            let rows = try database.fetchTopicTimingReports()
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows[0].baseURL, "https://idcflare.com")
+            XCTAssertEqual(rows[0].forumId, TopicTimingReportPersistence.unresolvedForumId)
+            XCTAssertEqual(rows[0].statusCode, 403)
+            XCTAssertEqual(rows[0].outcome, .failure)
+        }
+    }
+
+    func testTimingReportResolvesForumIdFromTrimmedBaseURL() throws {
+        try withDatabase { database in
+            var forum = ForumInstance.new(title: "IDC", baseURL: "https://idcflare.com/")
+            try database.saveForum(&forum)
+            let resolved = TopicTimingReportPersistence.resolvedForumId(
+                preferred: nil,
+                baseURL: "https://idcflare.com",
+                forums: [forum]
+            )
+            XCTAssertEqual(resolved, forum.id)
+        }
+    }
+
     private func withDatabase(_ body: (DatabaseManager) throws -> Void) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("dexo-read-history-tests-\(UUID().uuidString)", isDirectory: true)
@@ -401,15 +451,18 @@ final class ReadTimingAlgorithmTests: XCTestCase {
         XCTAssertNil(parameters["timings"])
     }
 
-    func testUnreadDotClearsOnlyAfterSuccessfulSendOrServerRead() {
+    func testUnreadDotStaysUntilSessionSendEvenWhenServerRead() {
         let clock = ManualReadTimingClock(time: 100)
         let tracker = TopicReadTracker(now: { clock.time })
         tracker.startSession()
 
         XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
-        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 2, serverRead: true))
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 2, serverRead: true))
         tracker.markServerRead(3)
-        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 3, serverRead: false))
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 3, serverRead: true))
+        XCTAssertTrue(
+            tracker.showsUnreadDot(postNumber: 5, serverRead: true, lastReadPostNumber: 4)
+        )
 
         tracker.recordVisible(postNumber: 1)
         clock.time += 1
@@ -417,10 +470,10 @@ final class ReadTimingAlgorithmTests: XCTestCase {
         XCTAssertFalse(tracker.shouldPeriodicFlush())
         let snapshot = tracker.snapshotDelta()
         XCTAssertEqual(snapshot.timings[1], 1_000)
-        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: true))
 
         tracker.commitSend()
-        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: true))
         XCTAssertFalse(tracker.shouldRushFlush())
     }
 

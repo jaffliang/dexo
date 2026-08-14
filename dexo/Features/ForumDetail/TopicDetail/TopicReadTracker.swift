@@ -150,10 +150,17 @@ nonisolated final class TopicReadTracker {
         inFlightTimings = [:]
     }
 
-    /// `!post.read && !readInThisSession`
-    func showsUnreadDot(postNumber: Int, serverRead: Bool) -> Bool {
-        if serverRead || serverReadPosts.contains(postNumber) { return false }
-        return !sessionReadPosts.contains(postNumber)
+    /// Show until this session's timings POST included the post.
+    /// `post.read` / `markServerRead` must not hide the dot — idcflare often
+    /// marks every post `read: true` after a topic is opened.
+    func showsUnreadDot(
+        postNumber: Int,
+        serverRead _: Bool = false,
+        lastReadPostNumber: Int? = nil
+    ) -> Bool {
+        if sessionReadPosts.contains(postNumber) { return false }
+        if let lastReadPostNumber, postNumber > lastReadPostNumber { return true }
+        return true
     }
 
     /// True when a post has accumulated time and has never been sent.

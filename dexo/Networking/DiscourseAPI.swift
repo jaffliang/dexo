@@ -920,6 +920,9 @@ final class DiscourseAPI {
         // fluxidc request_header_interceptor: Origin + Referer of the forum.
         headers.add(name: "Origin", value: baseURL)
         headers.add(name: "Referer", value: baseURL + "/")
+        if AuthManager.shared.isAuthenticated(for: baseURL) {
+            headers.add(name: "Discourse-Present", value: "true")
+        }
         debugLog("[DiscourseAPI] POST /topics/timings topic=\(topicId) topic_time=\(topicTime) posts=\(timings.count)")
         let attemptedAt = Date()
         let requestStart = Date()
@@ -1012,9 +1015,14 @@ final class DiscourseAPI {
         trippedBreaker: Bool,
         errorSummary: String?
     ) {
-        guard let forumID else { return }
+        let forums = (try? DatabaseManager.shared.fetchAllForums()) ?? []
+        let resolvedForumId = TopicTimingReportPersistence.resolvedForumId(
+            preferred: forumID,
+            baseURL: baseURL,
+            forums: forums
+        )
         var report = TopicTimingReport(
-            forumId: forumID,
+            forumId: resolvedForumId,
             baseURL: baseURL,
             accountName: AuthManager.shared.username(for: baseURL),
             topicId: topicId,

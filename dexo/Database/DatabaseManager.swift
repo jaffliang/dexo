@@ -130,6 +130,34 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v6_timing_reports_without_forum_fk") { db in
+            try db.create(table: "topicTimingReport_new") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("forumId", .integer).notNull()
+                t.column("baseURL", .text).notNull()
+                t.column("accountName", .text)
+                t.column("topicId", .integer).notNull()
+                t.column("attemptedAt", .datetime).notNull()
+                t.column("topicTime", .integer).notNull()
+                t.column("postCount", .integer).notNull()
+                t.column("visibleTime", .integer).notNull()
+                t.column("requestDuration", .integer).notNull()
+                t.column("statusCode", .integer)
+                t.column("outcome", .text).notNull()
+                t.column("consecutiveFailureCount", .integer).notNull()
+                t.column("trippedBreaker", .boolean).notNull().defaults(to: false)
+                t.column("errorSummary", .text)
+            }
+            try db.execute(sql: "INSERT INTO topicTimingReport_new SELECT * FROM topicTimingReport")
+            try db.drop(table: "topicTimingReport")
+            try db.rename(table: "topicTimingReport_new", to: "topicTimingReport")
+            try db.create(
+                index: "topicTimingReport_attemptedAt",
+                on: "topicTimingReport",
+                columns: ["attemptedAt"]
+            )
+        }
+
         return migrator
     }
 

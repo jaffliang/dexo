@@ -760,7 +760,11 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
               !post.deletedPostPlaceholder
         else { return false }
         prepareReadTracking(for: post)
-        return readTracker.showsUnreadDot(postNumber: post.postNumber, serverRead: post.read)
+        return readTracker.showsUnreadDot(
+            postNumber: post.postNumber,
+            serverRead: post.read,
+            lastReadPostNumber: viewModel.topic?.lastReadPostNumber
+        )
     }
 
     private func refreshVisibleUnreadDots(animated: Bool) {
