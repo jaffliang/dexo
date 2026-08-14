@@ -917,6 +917,9 @@ final class DiscourseAPI {
         // XMLHttpRequest` (CSRF/origin guard) → 403. fluxidc's Dio client
         // sends this on every request; other DiscourseAPI POSTs already do.
         headers.add(name: "X-Requested-With", value: "XMLHttpRequest")
+        // fluxidc request_header_interceptor: Origin + Referer of the forum.
+        headers.add(name: "Origin", value: baseURL)
+        headers.add(name: "Referer", value: baseURL + "/")
         debugLog("[DiscourseAPI] POST /topics/timings topic=\(topicId) topic_time=\(topicTime) posts=\(timings.count)")
         let attemptedAt = Date()
         let requestStart = Date()
