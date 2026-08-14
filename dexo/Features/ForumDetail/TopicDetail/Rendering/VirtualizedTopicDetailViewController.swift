@@ -713,15 +713,34 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private func resumeReadTracking() {
         readTracker.unfreeze()
         readTracker.startSession()
-        for indexPath in collectionView.indexPathsForVisibleItems {
-            guard let item = dataSource.itemIdentifier(for: indexPath),
-                  let postId = postIdByItem[item],
+        syncVisibleReadTracking()
+        refreshVisibleUnreadDots(animated: false)
+    }
+
+    /// Do not rely only on `willDisplay`: custom layouts can skip it until the
+    /// first scroll, which left stared-at posts untracked and their dots stuck.
+    private func syncVisibleReadTracking() {
+        var postIds = Set<Int>()
+        func track(item: VirtualTopicItem) {
+            guard let postId = postIdByItem[item],
+                  postIds.insert(postId).inserted,
                   let post = viewModel.postsById[postId]
-            else { continue }
+            else { return }
             prepareReadTracking(for: post)
             readTracker.recordVisible(postNumber: post.postNumber)
         }
-        refreshVisibleUnreadDots(animated: false)
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            if let item = dataSource.itemIdentifier(for: indexPath) {
+                track(item: item)
+            }
+        }
+        for cell in collectionView.visibleCells {
+            if let indexPath = collectionView.indexPath(for: cell),
+               let item = dataSource.itemIdentifier(for: indexPath)
+            {
+                track(item: item)
+            }
+        }
     }
 
     private func prepareReadTracking(for post: DiscourseTopicDetail.Post) {
@@ -740,13 +759,35 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     private func refreshVisibleUnreadDots(animated: Bool) {
         guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL) else { return }
+        var refreshed = Set<VirtualTopicItem>()
+        func applyDot(to header: VirtualPostHeaderCell, item: VirtualTopicItem) {
+            guard case .header(let postId) = item,
+                  let post = viewModel.postsById[postId]
+            else { return }
+            header.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
+            refreshed.insert(item)
+        }
+        for cell in collectionView.visibleCells {
+            guard let header = cell as? VirtualPostHeaderCell,
+                  let indexPath = collectionView.indexPath(for: header),
+                  let item = dataSource.itemIdentifier(for: indexPath)
+            else { continue }
+            applyDot(to: header, item: item)
+        }
+        var headersToReconfigure: [IndexPath] = []
         for indexPath in collectionView.indexPathsForVisibleItems {
             guard let item = dataSource.itemIdentifier(for: indexPath),
-                  case .header(let postId) = item,
-                  let post = viewModel.postsById[postId],
-                  let cell = collectionView.cellForItem(at: indexPath) as? VirtualPostHeaderCell
+                  case .header = item,
+                  !refreshed.contains(item)
             else { continue }
-            cell.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
+            if let header = collectionView.cellForItem(at: indexPath) as? VirtualPostHeaderCell {
+                applyDot(to: header, item: item)
+            } else {
+                headersToReconfigure.append(indexPath)
+            }
+        }
+        if !headersToReconfigure.isEmpty {
+            collectionView.reconfigureItems(at: headersToReconfigure)
         }
     }
 
@@ -768,6 +809,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         stopReadTickTimer()
         let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
+            self.syncVisibleReadTracking()
             if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
                 self.flushReadTimings()
             }

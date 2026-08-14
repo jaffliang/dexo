@@ -719,6 +719,10 @@ final class LegacyTopicDetailViewController: ObservableViewController {
     private func resumeReadTracking() {
         readTracker.unfreeze()
         readTracker.startSession()
+        syncVisibleReadTracking()
+    }
+
+    private func syncVisibleReadTracking() {
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   case .post(let postId) = item,
@@ -748,6 +752,7 @@ final class LegacyTopicDetailViewController: ObservableViewController {
         stopReadTickTimer()
         let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
+            self.syncVisibleReadTracking()
             if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
                 self.flushReadTimings()
             }
