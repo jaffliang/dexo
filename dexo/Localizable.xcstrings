@@ -6401,22 +6401,6 @@
         }
       }
     },
-    "read_timings.banner.not_logged_in" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sign in to report read time"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未登录，无法上报阅读时间"
-          }
-        }
-      }
-    },
     "read_timings.banner.retrying %lld" : {
       "localizations" : {
         "en" : {

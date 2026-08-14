@@ -319,15 +319,28 @@ final class TopicTimingPolicyTests: XCTestCase {
         settings.linuxDoReadTimingsEnabled = true
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com", isAuthenticated: true))
         settings.linuxDoReadTimingsEnabled = false
-        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com", isAuthenticated: true))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com", isAuthenticated: true))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: false))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: false))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com", isAuthenticated: false))
+    }
+
+    func testGuestHasNoUnreadDotChromeAndNoNotLoggedInCopy() {
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: false))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: false))
+        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+        XCTAssertFalse(
+            String(localized: "read_timings.banner.succeeded")
+                .contains("未登录，无法上报阅读时间")
+        )
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {

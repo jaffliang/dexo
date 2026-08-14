@@ -105,7 +105,6 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private var pendingReadFlush: DispatchWorkItem?
     private var isFlushingReadTimings = false
     private var hasPendingReadFlush = false
-    private var didWarnUnauthenticatedReadTimings = false
     private var readTimingsBannerHideWork: DispatchWorkItem?
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
@@ -554,7 +553,6 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        didWarnUnauthenticatedReadTimings = false
         resumeReadTracking()
         startReadFlushTimer()
         startReadTickTimer()
@@ -857,14 +855,9 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     }
 
     private func flushReadTimings() {
-        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL) else { return }
-        guard AuthManager.shared.isAuthenticated(for: api.baseURL) else {
-            if !didWarnUnauthenticatedReadTimings {
-                didWarnUnauthenticatedReadTimings = true
-                showReadTimingsBanner(String(localized: "read_timings.banner.not_logged_in"))
-            }
-            return
-        }
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
+              AuthManager.shared.isAuthenticated(for: api.baseURL)
+        else { return }
         if isFlushingReadTimings {
             hasPendingReadFlush = true
             return

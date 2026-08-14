@@ -66,10 +66,11 @@ enum ReadTimingUserStatus: Equatable, Sendable {
 }
 
 extension ForumPolicy {
-    /// Unread-dot chrome follows tracking, not the CF/login family set.
-    /// linux.do stays behind `linuxDoReadTimingsEnabled`; every other forum
-    /// (including idcflare) is on by default.
-    static func showsReadTimingUnreadDot(baseURL: String) -> Bool {
-        tracksReadTimings(baseURL: baseURL)
+    /// Unread-dot chrome follows tracking and login. Guests stay silent
+    /// (no dots, no timings POST). linux.do stays behind
+    /// `linuxDoReadTimingsEnabled`; every other forum is on by default.
+    static func showsReadTimingUnreadDot(baseURL: String, isAuthenticated: Bool? = nil) -> Bool {
+        let authenticated = isAuthenticated ?? AuthManager.shared.isAuthenticated(for: baseURL)
+        return tracksReadTimings(baseURL: baseURL) && authenticated
     }
 }
