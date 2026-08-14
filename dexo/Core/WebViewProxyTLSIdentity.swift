@@ -17,7 +17,7 @@ nonisolated final class WebViewProxyTLSIdentity: @unchecked Sendable {
 /// certificate with an exact SAN is generated and signed for every CONNECT
 /// hostname. Nothing is installed into the system trust store.
 nonisolated final class WebViewProxyCertificateAuthority: @unchecked Sendable {
-    enum AuthorityError: Error {
+    enum AuthorityError: Error, LocalizedError {
         case caPrivateKeyLookupFailed(OSStatus)
         case caCertificateLookupFailed(OSStatus)
         case caPrivateKeyGenerationFailed(CFError?)
@@ -35,6 +35,8 @@ nonisolated final class WebViewProxyCertificateAuthority: @unchecked Sendable {
         case identityLookupFailed(OSStatus)
         case identityCertificateMismatch
         case identityBridgeFailed
+
+        var errorDescription: String? { String(describing: self) }
     }
 
     let certificate: SecCertificate

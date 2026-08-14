@@ -129,6 +129,7 @@ final class ChallengeViewController: BaseViewController {
     }()
 
     private var progressObservation: NSKeyValueObservation?
+    private var persistLoadErrorUntilRetry = false
 
     init(targetURL: URL, userAgent: String?) {
         self.targetURL = targetURL
@@ -213,10 +214,14 @@ final class ChallengeViewController: BaseViewController {
             webView.configuration.websiteDataStore.httpCookieStore.add(coordinator)
             isObservingCookieChanges = true
             hideLoadError()
+            if let warning = WebViewDoHConfigurator.attachWarning(from: lease) {
+                persistLoadErrorUntilRetry = true
+                showLoadError(warning)
+            }
             webView.load(URLRequest(url: targetURL))
         } catch {
             guard !Task.isCancelled else { return }
-            showProxyUnavailableAlert()
+            showProxyUnavailableAlert(error)
         }
     }
 
@@ -235,10 +240,10 @@ final class ChallengeViewController: BaseViewController {
         navigationController?.navigationBar.tintColor = theme.accentColor
     }
 
-    private func showProxyUnavailableAlert() {
+    private func showProxyUnavailableAlert(_ error: Error) {
         let alert = UIAlertController(
             title: String(localized: "doh.proxy.error.title"),
-            message: String(localized: "doh.proxy.error.message"),
+            message: WebViewDoHProxyDiagnostics.alertMessage(for: error),
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default) { [weak self] _ in
@@ -287,6 +292,7 @@ final class ChallengeViewController: BaseViewController {
     }
 
     @objc private func retryTapped() {
+        persistLoadErrorUntilRetry = false
         hideLoadError()
         webView?.load(URLRequest(url: targetURL))
     }
@@ -298,7 +304,7 @@ final class ChallengeViewController: BaseViewController {
         }
         loadErrorLabel.text = String(
             format: String(localized: "challenge.load_failed.message %@"),
-            error.localizedDescription
+            WebViewDoHProxyDiagnostics.detail(for: error)
         )
         loadErrorView.isHidden = false
         view.bringSubviewToFront(loadErrorView)
@@ -306,6 +312,7 @@ final class ChallengeViewController: BaseViewController {
     }
 
     private func hideLoadError() {
+        if persistLoadErrorUntilRetry { return }
         loadErrorView.isHidden = true
     }
 

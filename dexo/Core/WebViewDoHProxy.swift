@@ -19,7 +19,11 @@ enum WebViewDoHConfigurator {
 
         guard AppSettings.shared.dohEnabled else { return nil }
         let lease = try await WebViewDoHProxy.shared.acquire()
-        try apply(lease, to: configuration)
+        do {
+            try apply(lease, to: configuration)
+        } catch {
+            lease.attachWarning = error
+        }
         return lease
     }
 
@@ -33,7 +37,15 @@ enum WebViewDoHConfigurator {
         guard AppSettings.shared.dohEnabled else { return nil }
         let lease = try await WebViewDoHProxy.shared.acquire()
         let original = configuration.websiteDataStore
-        try apply(lease, to: configuration)
+        do {
+            try apply(lease, to: configuration)
+        } catch {
+            // Listener is up. Keep the shared jar and let the caller present
+            // the WebView instead of blocking the challenge sheet.
+            configuration.websiteDataStore = original
+            lease.attachWarning = error
+            return lease
+        }
         if configuration.websiteDataStore !== original {
             await transferCookies(from: original, to: configuration.websiteDataStore)
             if original === WebCookieStore.shared.websiteDataStore {
@@ -41,6 +53,10 @@ enum WebViewDoHConfigurator {
             }
         }
         return lease
+    }
+
+    static func attachWarning(from lease: AnyObject?) -> Error? {
+        (lease as? WebViewDoHProxy.Lease)?.attachWarning
     }
 
     /// Configures the debug browser for a pure local MITM capture. This path
@@ -81,6 +97,7 @@ enum WebViewDoHConfigurator {
     static func clearProxy(on dataStore: WKWebsiteDataStore) {
         if #available(iOS 17.0, *) {
             dataStore.proxyConfigurations = []
+            return
         }
         WebViewLegacyHTTPProxy.clear(dataStore)
     }
@@ -94,11 +111,28 @@ enum WebViewDoHConfigurator {
             return
         }
 
-        // iOS 15/16: `_setProxyConfiguration` is not reliable on existing
-        // stores. Create (and reuse) one proxied `WKWebsiteDataStore` so
-        // challenge and password-login keep sharing a jar.
-        let store = try WebViewDoHProxy.shared.legacyProxiedDataStore(port: lease.port)
-        configuration.websiteDataStore = store
+        // iOS 15/16: keep the caller's jar (shared Cloudflare cookies) and
+        // attach the CONNECT listener in place. Only mint a replacement
+        // store if `_setProxyConfiguration:` is missing on that instance.
+        let existing = configuration.websiteDataStore
+        if WebViewLegacyHTTPProxy.apply(port: lease.port, to: existing) {
+            #if DEBUG
+            print("[WebViewDoHProxy] attached CONNECT proxy to existing data store on 127.0.0.1:\(lease.port)")
+            #endif
+            return
+        }
+
+        do {
+            let store = try WebViewDoHProxy.shared.legacyProxiedDataStore(port: lease.port)
+            configuration.websiteDataStore = store
+            #if DEBUG
+            print("[WebViewDoHProxy] replaced data store with proxied store on 127.0.0.1:\(lease.port)")
+            #endif
+        } catch {
+            throw WebViewDoHProxy.ProxyError.legacyProxyAttachFailed(
+                WebViewLegacyHTTPProxy.attachFailureReason(port: lease.port, dataStore: existing)
+            )
+        }
     }
 
     private static func transferCookies(from source: WKWebsiteDataStore, to destination: WKWebsiteDataStore) async {
@@ -151,6 +185,7 @@ final class WebViewDoHProxy {
     final class Lease {
         fileprivate let id: UUID
         let port: UInt16
+        fileprivate(set) var attachWarning: Error?
 
         @available(iOS 17.0, *)
         var proxyConfiguration: ProxyConfiguration {
@@ -174,10 +209,41 @@ final class WebViewDoHProxy {
         }
     }
 
-    enum ProxyError: Error {
+    enum ProxyError: Error, LocalizedError {
         case listenerStopped
         case unavailablePort
         case invalidDoHConfiguration
+        case certificateAuthorityFailed(Error)
+        case listenerStartFailed(Error)
+        case legacyProxyAttachFailed(String)
+
+        var caseName: String {
+            switch self {
+            case .listenerStopped: return "listenerStopped"
+            case .unavailablePort: return "unavailablePort"
+            case .invalidDoHConfiguration: return "invalidDoHConfiguration"
+            case .certificateAuthorityFailed: return "certificateAuthorityFailed"
+            case .listenerStartFailed: return "listenerStartFailed"
+            case .legacyProxyAttachFailed: return "legacyProxyAttachFailed"
+            }
+        }
+
+        var errorDescription: String? {
+            switch self {
+            case .listenerStopped:
+                return "CONNECT listener stopped"
+            case .unavailablePort:
+                return "CONNECT listener has no port"
+            case .invalidDoHConfiguration:
+                return "DoH is on but the selected server URL is missing or invalid"
+            case .certificateAuthorityFailed(let error):
+                return error.localizedDescription
+            case .listenerStartFailed(let error):
+                return error.localizedDescription
+            case .legacyProxyAttachFailed(let reason):
+                return reason
+            }
+        }
     }
 
     private let queue = DispatchQueue(label: "xyz.47258.dexo.webview-native-mitm")
@@ -239,10 +305,12 @@ final class WebViewDoHProxy {
     func stop() {
         if #available(iOS 17.0, *) {
             WKWebsiteDataStore.default().proxyConfigurations = []
-        }
-        WebViewLegacyHTTPProxy.clear(WKWebsiteDataStore.default())
-        if let cachedLegacyDataStore {
-            WebViewLegacyHTTPProxy.clear(cachedLegacyDataStore)
+        } else {
+            WebViewLegacyHTTPProxy.clear(WKWebsiteDataStore.default())
+            if let cachedLegacyDataStore {
+                WebViewLegacyHTTPProxy.clear(cachedLegacyDataStore)
+            }
+            WebViewLegacyHTTPProxy.clear(WebCookieStore.shared.websiteDataStore)
         }
         cachedLegacyDataStore = nil
         stopListener(error: ProxyError.listenerStopped)
@@ -252,15 +320,27 @@ final class WebViewDoHProxy {
         if let cachedLegacyDataStore {
             return cachedLegacyDataStore
         }
-        guard let store = WebViewLegacyHTTPProxy.makeNonPersistentDataStore(port: port) else {
-            throw ProxyError.unavailablePort
+        if let store = WebViewLegacyHTTPProxy.makeNonPersistentDataStore(port: port) {
+            cachedLegacyDataStore = store
+            return store
         }
-        cachedLegacyDataStore = store
-        return store
+        let fallback = WKWebsiteDataStore.nonPersistent()
+        if WebViewLegacyHTTPProxy.apply(port: port, to: fallback) {
+            cachedLegacyDataStore = fallback
+            return fallback
+        }
+        throw ProxyError.legacyProxyAttachFailed(
+            WebViewLegacyHTTPProxy.attachFailureReason(port: port, dataStore: fallback)
+        )
     }
 
     private func startListener() throws {
-        let certificateAuthority = try WebViewProxyCertificateAuthority.loadOrCreate()
+        let certificateAuthority: WebViewProxyCertificateAuthority
+        do {
+            certificateAuthority = try WebViewProxyCertificateAuthority.loadOrCreate()
+        } catch {
+            throw ProxyError.certificateAuthorityFailed(error)
+        }
         self.certificateAuthority = certificateAuthority
 
         let tcpOptions = NWProtocolTCP.Options()
@@ -275,7 +355,14 @@ final class WebViewDoHProxy {
             at: 0
         )
 
-        let listener = try NWListener(using: parameters, on: .any)
+        let listener: NWListener
+        do {
+            listener = try makeLoopbackListener(parameters: parameters)
+        } catch {
+            WebViewMITMFramerContext.shared.clear()
+            self.certificateAuthority = nil
+            throw ProxyError.listenerStartFailed(error)
+        }
         if #available(iOS 16.0, *) {
             listener.newConnectionLimit = 128
         }
@@ -292,6 +379,16 @@ final class WebViewDoHProxy {
             }
         }
         listener.start(queue: queue)
+    }
+
+    private func makeLoopbackListener(parameters: NWParameters) throws -> NWListener {
+        do {
+            return try NWListener(using: parameters, on: .any)
+        } catch {
+            // iOS 15.0–15.6: requiredLocalEndpoint + on:.any can fail together.
+            parameters.requiredLocalEndpoint = nil
+            return try NWListener(using: parameters, on: .any)
+        }
     }
 
     private func handleListenerState(_ state: NWListener.State) {
@@ -316,7 +413,7 @@ final class WebViewDoHProxy {
                 )
             }
         case .failed(let error):
-            stopListener(error: error)
+            stopListener(error: ProxyError.listenerStartFailed(error))
         case .cancelled:
             if !pendingAcquires.isEmpty {
                 stopListener(error: ProxyError.listenerStopped)
@@ -396,5 +493,19 @@ final class WebViewDoHProxy {
         if !pendingAcquires.isEmpty {
             failPendingAcquires(error ?? ProxyError.listenerStopped)
         }
+    }
+}
+
+enum WebViewDoHProxyDiagnostics {
+    static func detail(for error: Error) -> String {
+        if let proxy = error as? WebViewDoHProxy.ProxyError {
+            return "ProxyError.\(proxy.caseName): \(proxy.localizedDescription)"
+        }
+        let nsError = error as NSError
+        return "\(nsError.domain) (\(nsError.code)): \(error.localizedDescription)"
+    }
+
+    static func alertMessage(for error: Error) -> String {
+        String(localized: "doh.proxy.error.message") + "\n\n" + detail(for: error)
     }
 }

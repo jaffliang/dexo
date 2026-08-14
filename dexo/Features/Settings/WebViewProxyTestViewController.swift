@@ -212,7 +212,7 @@ final class WebViewProxyTestViewController: BaseViewController {
             message = String(localized: "settings.debug.webview_proxy_test.unsupported.message")
         default:
             title = String(localized: "doh.proxy.error.title")
-            message = String(localized: "doh.proxy.error.message")
+            message = WebViewDoHProxyDiagnostics.alertMessage(for: error)
         }
 
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)

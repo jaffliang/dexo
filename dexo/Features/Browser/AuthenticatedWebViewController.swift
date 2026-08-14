@@ -223,14 +223,14 @@ final class AuthenticatedWebViewController: BaseViewController {
             updateBackItem()
         } catch {
             guard !Task.isCancelled else { return }
-            showProxyUnavailableAlert()
+            showProxyUnavailableAlert(error)
         }
     }
 
-    private func showProxyUnavailableAlert() {
+    private func showProxyUnavailableAlert(_ error: Error) {
         let alert = UIAlertController(
             title: String(localized: "doh.proxy.error.title"),
-            message: String(localized: "doh.proxy.error.message"),
+            message: WebViewDoHProxyDiagnostics.alertMessage(for: error),
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default) { [weak self] _ in

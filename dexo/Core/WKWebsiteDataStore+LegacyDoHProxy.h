@@ -18,6 +18,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)dexo_clearLoopbackHTTPProxyOnDataStore:(WKWebsiteDataStore *)dataStore
     NS_SWIFT_NAME(dexo_clearProxy(on:));
 
++ (BOOL)dexo_dataStoreSupportsProxyConfiguration:(WKWebsiteDataStore *)dataStore
+    NS_SWIFT_NAME(dexo_supportsProxyConfiguration(_:));
+
++ (nullable NSString *)dexo_lastFailureReason
+    NS_SWIFT_NAME(dexo_lastFailureReason());
+
 @end
 
 NS_ASSUME_NONNULL_END
