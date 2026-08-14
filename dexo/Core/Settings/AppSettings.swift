@@ -334,6 +334,29 @@ final class AppSettings {
         defaults.integer(forKey: "linuxDoReadTimingsActivationGeneration")
     }
 
+    /// idcflare timing uploads default on. `bool(forKey:)` is false when the
+    /// key is missing, so treat a missing key as enabled.
+    var idcflareReadTimingsEnabled: Bool {
+        get {
+            if defaults.object(forKey: "idcflareReadTimingsEnabled") == nil { return true }
+            return defaults.bool(forKey: "idcflareReadTimingsEnabled")
+        }
+        set {
+            let wasEnabled = idcflareReadTimingsEnabled
+            defaults.set(newValue, forKey: "idcflareReadTimingsEnabled")
+            if newValue, !wasEnabled {
+                defaults.set(
+                    idcflareReadTimingsActivationGeneration + 1,
+                    forKey: "idcflareReadTimingsActivationGeneration"
+                )
+            }
+        }
+    }
+
+    var idcflareReadTimingsActivationGeneration: Int {
+        defaults.integer(forKey: "idcflareReadTimingsActivationGeneration")
+    }
+
     // MARK: - DNS over HTTPS
 
     struct DoHServer: Codable, Equatable, Identifiable, Sendable {

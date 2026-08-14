@@ -150,6 +150,8 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
             pendingReadTimingsStatusText = String(localized: "settings.read_timings.retrying \(Int(delay))")
         case .failed(let summary):
             pendingReadTimingsStatusText = String(localized: "settings.read_timings.error \(summary)")
+        case .autoDisabled:
+            pendingReadTimingsStatusText = String(localized: "settings.read_timings.auto_disabled.message")
         case .succeeded, .idle:
             return
         }

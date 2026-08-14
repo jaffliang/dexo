@@ -924,6 +924,9 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
             showReadTimingsBanner(String(localized: "read_timings.banner.failed \(summary)"))
         case .retrying(let delay, _):
             showReadTimingsBanner(String(localized: "read_timings.banner.retrying \(Int(delay))"))
+        case .autoDisabled:
+            showReadTimingsBanner(String(localized: "read_timings.banner.auto_disabled"))
+            refreshVisibleUnreadDots(animated: true)
         case .idle:
             break
         }

@@ -15,12 +15,53 @@ enum ForumPolicy {
         matches(baseURL: baseURL, hosts: likeButtonSuppressedHosts)
     }
 
-    /// True when this forum opts out of `/topics/timings` reporting.
+    /// True when this forum should POST `/topics/timings`.
     static func tracksReadTimings(baseURL: String) -> Bool {
-        guard matches(baseURL: baseURL, hosts: readTimingsOptInHosts) else {
+        switch readTimingsSite(baseURL: baseURL) {
+        case .linuxDo:
+            return AppSettings.shared.linuxDoReadTimingsEnabled
+        case .idcflare:
+            return AppSettings.shared.idcflareReadTimingsEnabled
+        case .other:
             return true
         }
-        return AppSettings.shared.linuxDoReadTimingsEnabled
+    }
+
+    enum ReadTimingsSite: Equatable {
+        case linuxDo
+        case idcflare
+        case other
+    }
+
+    static func readTimingsSite(baseURL: String) -> ReadTimingsSite {
+        guard let host = host(fromBaseURL: baseURL),
+              let registrable = linuxDoFamilyRegistrableHost(forHost: host)
+        else { return .other }
+        switch registrable {
+        case "linux.do": return .linuxDo
+        case "idcflare.com": return .idcflare
+        default: return .other
+        }
+    }
+
+    static func readTimingsActivationGeneration(baseURL: String) -> Int {
+        switch readTimingsSite(baseURL: baseURL) {
+        case .linuxDo: return AppSettings.shared.linuxDoReadTimingsActivationGeneration
+        case .idcflare: return AppSettings.shared.idcflareReadTimingsActivationGeneration
+        case .other: return 0
+        }
+    }
+
+    /// Turns off only the switch for this site. Other forums are unchanged.
+    static func disableReadTimingsReporting(baseURL: String) {
+        switch readTimingsSite(baseURL: baseURL) {
+        case .linuxDo:
+            AppSettings.shared.linuxDoReadTimingsEnabled = false
+        case .idcflare:
+            AppSettings.shared.idcflareReadTimingsEnabled = false
+        case .other:
+            break
+        }
     }
 
     /// linux.do and sister sites that share Cloudflare guest/password handling.

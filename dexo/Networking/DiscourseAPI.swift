@@ -13,8 +13,7 @@ struct TopicTimingCircuitBreaker {
     private(set) var failureCount = 0
     private var blockedUntil: Date?
 
-    /// Never permanently open. Transient errors only delay the next send.
-    var isTripped: Bool { false }
+    var isTripped: Bool { failureCount >= Self.maximumFailures }
 
     var isBlocked: Bool {
         guard let blockedUntil else { return false }
@@ -32,13 +31,28 @@ struct TopicTimingCircuitBreaker {
             blockedUntil = nil
             return false
         }
-        guard ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) else {
-            return false
-        }
-        let delay = ReadTimingAlgorithm.retryDelay(afterFailureCount: failureCount)
         failureCount += 1
-        blockedUntil = now.addingTimeInterval(delay)
-        return false
+        if ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) {
+            let delay = ReadTimingAlgorithm.retryDelay(afterFailureCount: failureCount - 1)
+            blockedUntil = now.addingTimeInterval(delay)
+        }
+        return isTripped
+    }
+
+    /// Records a real send outcome. After `maximumFailures` consecutive
+    /// failures, turns off only the switch for `baseURL`'s site.
+    @discardableResult
+    mutating func recordReportingOutcome(
+        _ outcome: TopicTimingOutcome,
+        statusCode: Int? = nil,
+        baseURL: String,
+        now: Date = Date()
+    ) -> Bool {
+        let tripped = record(outcome, statusCode: statusCode, now: now)
+        if tripped {
+            ForumPolicy.disableReadTimingsReporting(baseURL: baseURL)
+        }
+        return tripped
     }
 
     mutating func reset() {
@@ -883,12 +897,10 @@ final class DiscourseAPI {
     ///   - topicTime: total time spent on the topic in milliseconds
     ///   - timings: per-post duration map (postNumber → milliseconds visible)
     func postTopicTimings(topicId: Int, topicTime: Int, timings: [Int: Int]) async throws {
-        if ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: baseURL) {
-            let generation = AppSettings.shared.linuxDoReadTimingsActivationGeneration
-            if lastTopicTimingsActivationGeneration != generation {
-                topicTimingsCircuitBreaker.reset()
-                lastTopicTimingsActivationGeneration = generation
-            }
+        let generation = ForumPolicy.readTimingsActivationGeneration(baseURL: baseURL)
+        if lastTopicTimingsActivationGeneration != generation {
+            topicTimingsCircuitBreaker.reset()
+            lastTopicTimingsActivationGeneration = generation
         }
         let reportingEnabled = ForumPolicy.tracksReadTimings(baseURL: baseURL)
         if reportingEnabled, lastTopicTimingsReportingEnabled == false {
@@ -947,7 +959,11 @@ final class DiscourseAPI {
             headers: response.response
         )
         if assessment.outcome == .success {
-            _ = topicTimingsCircuitBreaker.record(.success, statusCode: assessment.statusCode)
+            _ = topicTimingsCircuitBreaker.recordReportingOutcome(
+                .success,
+                statusCode: assessment.statusCode,
+                baseURL: baseURL
+            )
             debugLog("[DiscourseAPI] timings: ok (\(assessment.statusCode ?? 0))")
             persistTopicTimingReport(
                 topicId: topicId,
@@ -963,13 +979,14 @@ final class DiscourseAPI {
             )
             postReadTimingsStatus(.succeeded)
         } else {
-            _ = topicTimingsCircuitBreaker.record(
+            let tripped = topicTimingsCircuitBreaker.recordReportingOutcome(
                 assessment.outcome,
-                statusCode: assessment.statusCode
+                statusCode: assessment.statusCode,
+                baseURL: baseURL
             )
             let summary = assessment.errorSummary ?? "Network request failed"
             let delay = topicTimingsCircuitBreaker.remainingBackoff
-            debugLog("[DiscourseAPI] timings: FAILED status=\(assessment.statusCode ?? 0) (consec=\(topicTimingsCircuitBreaker.failureCount)) retry_in=\(Int(delay))s")
+            debugLog("[DiscourseAPI] timings: FAILED status=\(assessment.statusCode ?? 0) (consec=\(topicTimingsCircuitBreaker.failureCount)) retry_in=\(Int(delay))s tripped=\(tripped)")
             persistTopicTimingReport(
                 topicId: topicId,
                 topicTime: topicTime,
@@ -979,10 +996,17 @@ final class DiscourseAPI {
                 statusCode: assessment.statusCode,
                 outcome: assessment.outcome,
                 consecutiveFailureCount: topicTimingsCircuitBreaker.failureCount,
-                trippedBreaker: false,
+                trippedBreaker: tripped,
                 errorSummary: summary
             )
-            if delay > 0 {
+            if tripped {
+                postReadTimingsStatus(.autoDisabled)
+                NotificationCenter.default.post(
+                    name: .linuxDoReadTimingsAutoDisabled,
+                    object: self,
+                    userInfo: ["baseURL": baseURL]
+                )
+            } else if delay > 0 {
                 postReadTimingsStatus(.retrying(delay: delay, summary: summary))
             } else {
                 postReadTimingsStatus(.failed(summary: summary))

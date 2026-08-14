@@ -40,6 +40,8 @@ final class SettingsViewController: ObservableViewController {
         _ = settings.dohEnabled
         _ = settings.dohServers
         _ = settings.defaultDoHServerID
+        _ = settings.linuxDoReadTimingsEnabled
+        _ = settings.idcflareReadTimingsEnabled
         tableView.reloadData()
     }
 
@@ -83,12 +85,13 @@ final class SettingsViewController: ObservableViewController {
     }
 
     private func networkRows() -> [NetworkRow] {
-        [.dohSettings, .linuxDoReadTimings, .timingReports]
+        [.dohSettings, .linuxDoReadTimings, .idcflareReadTimings, .timingReports]
     }
 
     private enum NetworkRow {
         case dohSettings
         case linuxDoReadTimings
+        case idcflareReadTimings
         case timingReports
     }
 
@@ -201,6 +204,8 @@ extension SettingsViewController: UITableViewDataSource {
                 return makeDoHSettingsCell(tableView, indexPath: indexPath)
             case .linuxDoReadTimings:
                 return makeLinuxDoReadTimingsCell(tableView, indexPath: indexPath)
+            case .idcflareReadTimings:
+                return makeIdcflareReadTimingsCell(tableView, indexPath: indexPath)
             case .timingReports:
                 return makeTimingReportsCell(tableView, indexPath: indexPath)
         }
@@ -338,6 +343,18 @@ extension SettingsViewController: UITableViewDataSource {
         return cell
     }
 
+    private func makeIdcflareReadTimingsCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        applyFonts(to: cell)
+        cell.textLabel?.text = String(localized: "settings.read_timings.idcflare")
+        cell.selectionStyle = .none
+        let toggle = UISwitch()
+        toggle.isOn = settings.idcflareReadTimingsEnabled
+        toggle.addTarget(self, action: #selector(idcflareReadTimingsChanged(_:)), for: .valueChanged)
+        cell.accessoryView = toggle
+        return cell
+    }
+
     private func makeTimingReportsCell(_ tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         applyFonts(to: cell)
@@ -455,7 +472,7 @@ extension SettingsViewController: UITableViewDelegate {
             switch networkRows()[indexPath.row] {
             case .dohSettings:
                 navigationController?.pushViewController(DoHSettingsViewController(), animated: true)
-            case .linuxDoReadTimings:
+            case .linuxDoReadTimings, .idcflareReadTimings:
                 break
             case .timingReports:
                 navigationController?.pushViewController(TopicTimingReportsViewController(), animated: true)
@@ -486,6 +503,10 @@ extension SettingsViewController {
 
     @objc private func linuxDoReadTimingsChanged(_ sender: UISwitch) {
         settings.linuxDoReadTimingsEnabled = sender.isOn
+    }
+
+    @objc private func idcflareReadTimingsChanged(_ sender: UISwitch) {
+        settings.idcflareReadTimingsEnabled = sender.isOn
     }
 
     private func reloadAppearanceSection() {

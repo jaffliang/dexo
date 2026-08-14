@@ -6310,13 +6310,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dexo stopped linux.do read-time reporting after 3 consecutive failures. Complete the site verification before enabling it again in Settings."
+            "value" : "Read-time reporting was turned off after 3 consecutive failures to avoid site risk control. You can turn it back on in Settings."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do 阅读时间上报已连续失败 3 次，Dexo 已自动关闭。请先完成站点验证，再到设置中手动开启。"
+            "value" : "阅读时间上报已连续失败 3 次，已自动关闭以免触发站点风控。可在设置中重新开启。"
           }
         }
       }
@@ -6342,13 +6342,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do reporting is off by default and may trigger site protection. Transient 403/429/network errors retry with backoff. The switch stays on; check report history for status."
+            "value" : "linux.do reporting is off by default; idcflare is on by default. After 3 consecutive failures that site’s switch turns off to avoid risk control. Turn it back on in Settings. Check report history for status."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do 阅读时间上报默认关闭，开启后可能触发站点防护。遇到 403/429/网络错误会自动退避重试，开关保持开启。可在上报记录中查看状态。"
+            "value" : "linux.do 阅读时间上报默认关闭，idcflare 默认开启。连续失败 3 次后仅关闭对应站点开关，以免触发风控。可在设置中重新开启，并在上报记录中查看状态。"
           }
         }
       }
@@ -6417,6 +6417,22 @@
         }
       }
     },
+    "read_timings.banner.auto_disabled" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read-time reporting turned off after 3 failures"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连续失败 3 次，已关闭上报以免触发风控"
+          }
+        }
+      }
+    },
     "read_timings.banner.succeeded" : {
       "localizations" : {
         "en" : {
@@ -6445,6 +6461,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未读"
+          }
+        }
+      }
+    },
+    "settings.read_timings.idcflare" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Report read time to idcflare"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "idcflare 阅读时间上报"
           }
         }
       }
