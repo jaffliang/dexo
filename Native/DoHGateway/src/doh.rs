@@ -387,8 +387,8 @@ mod tests {
         assert_eq!(endpoint.host, "unknown-doh.example");
         assert_eq!(endpoint.path, "/dns-query");
         assert!(endpoint.bootstrap.is_empty());
-        let custom = parse_doh_url("https://jeff-dean.ddd.oaifree.com/query-dns").unwrap();
-        assert_eq!(custom.host, "jeff-dean.ddd.oaifree.com");
+        let custom = parse_doh_url("https://doh.example.com/query-dns").unwrap();
+        assert_eq!(custom.host, "doh.example.com");
         assert_eq!(custom.path, "/query-dns");
         assert!(custom.bootstrap.is_empty());
         assert!(parse_doh_url("http://cloudflare-dns.com/dns-query").is_err());

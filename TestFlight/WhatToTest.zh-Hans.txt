@@ -2,7 +2,7 @@ What to Test
 
 Dexo 2.2（iOS 15+）
 
-- 设置 → 网络 → DoH：开启内置解析器或自定义 HTTPS DoH URL（包括 `https://jeff-dean.ddd.oaifree.com/query-dns` 这类端点）。确认论坛 API、话题列表和账密登录仍可用。iOS 15 上应用内 WKWebView 网页不走该代理。
+- 设置 → 网络 → DoH：开启内置解析器或自定义 HTTPS DoH URL。确认论坛 API、话题列表和账密登录仍可用。iOS 15 上应用内 WKWebView 网页不走该代理。
 - 切换 DoH 解析器时界面应保持可点（探测在主线程外，约 4 秒上限）。解析失败应回退或关闭 DoH，下次启动不得黑屏。
 - 在 DoH 设置中确认「ECH 已编译：是」。源站发布 HTTPS RR 时使用 ECH。Cloudflare 选择 `h2` 时走 HTTP/2；API 路径支持 brotli 解码。
 - 阅读时间：设置里 linux.do（默认关）与 idcflare（默认开）各有独立开关。未登录不得 POST `/topics/timings`，楼层旁也不得出现未读计时小蓝点。

@@ -2,7 +2,7 @@ What to Test
 
 Dexo 2.2 (iOS 15+)
 
-- Settings → Network → DoH: enable a built-in resolver or a custom HTTPS DoH URL (including endpoints like `https://jeff-dean.ddd.oaifree.com/query-dns`). Confirm forum API, topic lists, and password login still work. On iOS 15, in-app WKWebView pages are not proxied.
+- Settings → Network → DoH: enable a built-in resolver or a custom HTTPS DoH URL. Confirm forum API, topic lists, and password login still work. On iOS 15, in-app WKWebView pages are not proxied.
 - Switching DoH resolvers must stay responsive (probe is off the main thread, ~4s cap). If a resolver fails, the app should revert or disable DoH and must not black-screen on the next launch.
 - In DoH settings, confirm ECH compiled: yes. When the origin publishes an HTTPS RR, ECH is used. HTTP/2 when Cloudflare selects `h2`; brotli decode on the API path.
 - Read-time: Settings has separate switches for linux.do (off by default) and idcflare (on by default). Guests must not POST `/topics/timings` and must not show the small blue unread-timing dot next to post numbers.
