@@ -270,9 +270,13 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
         XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
-        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com"))
         settings.linuxDoReadTimingsEnabled = false
         XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com"))
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
