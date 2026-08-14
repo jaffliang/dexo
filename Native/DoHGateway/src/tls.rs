@@ -69,8 +69,9 @@ impl GatewayTls {
                             return Ok((tls, true));
                         }
                         Err(error) => {
-                            // Stream is burned; the caller must open a new TCP
-                            // connection and call `connect_visible_sni`.
+                            // Stream is burned. When an HTTPS RR published ECH,
+                            // the caller tries the next hint/CF IP with ECH —
+                            // not visible SNI on this connection.
                             eprintln!("[DoHGateway] ECH handshake failed for {host}: {error}");
                             return Err(error.to_string());
                         }

@@ -100,22 +100,22 @@ impl Gateway {
             .iter()
             .filter_map(|record| record.ech_config.clone())
             .next();
+        let has_ech = ech_config.is_some();
         let hints = ipv4_hints(&lookup);
 
-        let mut tried = Vec::new();
-        let mut last_visible = None;
-        let mut last_error = "all upstream addresses failed".to_string();
+        let mut attempts = Vec::new();
         for ip in addresses {
+            let use_ech = should_use_ech(ip, &hints, has_ech);
+            if has_ech && !use_ech {
+                continue;
+            }
             let addr = SocketAddr::new(ip, upstream.port);
-            tried.push(ip);
-            let use_ech = should_use_ech(ip, &hints, ech_config.is_some());
             let ech_for_ip = if use_ech {
                 ech_config.as_deref()
             } else {
                 None
             };
-            match self.forward(&request, &upstream, addr, ech_for_ip).await
-            {
+            match self.forward(&request, &upstream, addr, ech_for_ip).await {
                 Ok(response) => {
                     eprintln!(
                         "[DoHGateway] {} {} -> {} ({}) ech={}",
@@ -132,20 +132,29 @@ impl Gateway {
                     return Ok(());
                 }
                 Err(error) => {
-                    let visible = format_attempt_error(addr, false, &error.message);
-                    if error.after_visible_sni {
-                        last_visible = Some(visible.clone());
-                    }
-                    last_error = if error.after_visible_sni {
-                        visible
-                    } else {
-                        format_attempt_error(addr, use_ech, &error.message)
-                    };
+                    eprintln!(
+                        "[DoHGateway] {} {addr} failed: {}",
+                        if use_ech { "ECH" } else { "visible" },
+                        error.message
+                    );
+                    attempts.push(AttemptRecord {
+                        ip,
+                        kind: if use_ech {
+                            AttemptKind::Ech
+                        } else {
+                            AttemptKind::Visible
+                        },
+                        error: error.message,
+                    });
                 }
             }
         }
-        let report = last_visible.unwrap_or(last_error);
-        write_error(&mut client, 502, &append_tried_ips(&report, &tried)).await
+        write_error(
+            &mut client,
+            502,
+            &format_failure_report(has_ech, &lookup, &attempts),
+        )
+        .await
     }
 
     async fn forward(
@@ -155,23 +164,18 @@ impl Gateway {
         addr: SocketAddr,
         ech_config: Option<&[u8]>,
     ) -> Result<(Vec<u8>, bool), AttemptError> {
+        // An HTTPS RR with ECH means visible SNI is known-useless on this
+        // network (RST). Try ECH only; the caller moves to the next hint/CF IP.
         if let Some(config) = ech_config {
-            match self.try_ech(request, upstream, addr, config).await {
-                Ok(bytes) => return Ok((bytes, true)),
-                Err(error) => {
-                    eprintln!(
-                        "[DoHGateway] ECH {addr} failed ({error}); visible SNI fallback ≤2s"
-                    );
-                }
-            }
+            return match self.try_ech(request, upstream, addr, config).await {
+                Ok(bytes) => Ok((bytes, true)),
+                Err(message) => Err(AttemptError { message }),
+            };
         }
 
         match self.try_visible_sni(request, upstream, addr).await {
             Ok(bytes) => Ok((bytes, false)),
-            Err(message) => Err(AttemptError {
-                message,
-                after_visible_sni: true,
-            }),
+            Err(message) => Err(AttemptError { message }),
         }
     }
 
@@ -214,7 +218,23 @@ impl Gateway {
 
 struct AttemptError {
     message: String,
-    after_visible_sni: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptKind {
+    Ech,
+    Visible,
+}
+
+struct AttemptRecord {
+    ip: IpAddr,
+    kind: AttemptKind,
+    error: String,
+}
+
+#[cfg(test)]
+fn should_try_visible_sni(ech_present: bool) -> bool {
+    !ech_present
 }
 
 async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
@@ -239,21 +259,29 @@ fn is_no_route(error: &std::io::Error) -> bool {
     ) || matches!(error.raw_os_error(), Some(51 | 65 | 101 | 113))
 }
 
+#[cfg(test)]
 fn format_attempt_error(addr: SocketAddr, ech_present: bool, error: &str) -> String {
     let family = if addr.is_ipv4() { "IPv4" } else { "IPv6" };
     let ech = if ech_present { "yes" } else { "no" };
-    let detail = if is_no_route_text(error) {
-        "No route to host"
+    format!("{family} {} ech={ech} {}", addr.ip(), summarize_error(error))
+}
+
+fn summarize_error(error: &str) -> String {
+    if is_no_route_text(error) {
+        "No route to host".into()
     } else if is_reset_text(error) {
-        "connection reset"
+        "connection reset".into()
     } else if error.contains("connect timeout") {
-        "connect timeout"
+        "connect timeout".into()
     } else if error.contains("timeout") || error.contains("timed out") {
-        "TLS timeout"
+        "TLS timeout".into()
     } else {
         error
-    };
-    format!("{family} {} ech={ech} {detail}", addr.ip())
+            .replace('\n', " ")
+            .replace('\r', " ")
+            .trim()
+            .to_string()
+    }
 }
 
 fn is_reset_text(error: &str) -> bool {
@@ -261,16 +289,61 @@ fn is_reset_text(error: &str) -> bool {
     lower.contains("reset") || lower.contains("os error 54")
 }
 
-fn append_tried_ips(message: &str, tried: &[IpAddr]) -> String {
-    if tried.is_empty() {
-        return message.to_string();
+fn format_a_list(lookup: &crate::dns::Lookup) -> String {
+    let ordered = ordered_addresses(lookup);
+    let ipv4: Vec<String> = ordered
+        .iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(v4) => Some(v4.to_string()),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if !ipv4.is_empty() {
+        return ipv4.join(",");
     }
-    let ips = tried
+    lookup
+        .ipv4
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
-        .join(",");
-    format!("{message} ips={ips}")
+        .join(",")
+}
+
+fn format_failure_report(
+    ech_rr: bool,
+    lookup: &crate::dns::Lookup,
+    attempts: &[AttemptRecord],
+) -> String {
+    let compiled = if crate::dexo_doh_gateway_ech_compiled() != 0 {
+        "yes"
+    } else {
+        "no"
+    };
+    let ech_rr_label = if ech_rr { "yes" } else { "no" };
+    let a_list = format_a_list(lookup);
+    let mut parts = vec![format!(
+        "compiled={compiled} ech_rr={ech_rr_label} A={a_list}"
+    )];
+    if attempts.is_empty() {
+        if ech_rr {
+            parts.push("no Cloudflare/hint IP for ECH".into());
+        } else {
+            parts.push("all upstream addresses failed".into());
+        }
+    } else {
+        for attempt in attempts {
+            let kind = match attempt.kind {
+                AttemptKind::Ech => "ECH",
+                AttemptKind::Visible => "visible",
+            };
+            parts.push(format!(
+                "{} {kind}: {}",
+                attempt.ip,
+                summarize_error(&attempt.error)
+            ));
+        }
+    }
+    parts.join("; ")
 }
 
 fn is_no_route_text(error: &str) -> bool {
@@ -837,15 +910,68 @@ mod tests {
             format_attempt_error(addr, false, "Connection reset by peer (os error 54)"),
             "IPv4 104.20.16.234 ech=no connection reset"
         );
-        assert_eq!(
-            append_tried_ips(
-                "IPv4 104.20.16.234 ech=no connection reset",
-                &[
-                    "104.20.16.234".parse::<IpAddr>().unwrap(),
-                    "172.66.166.61".parse::<IpAddr>().unwrap(),
-                ]
-            ),
-            "IPv4 104.20.16.234 ech=no connection reset ips=104.20.16.234,172.66.166.61"
+    }
+
+    #[test]
+    fn ech_present_never_falls_back_to_visible_sni() {
+        assert!(!should_try_visible_sni(true));
+        assert!(should_try_visible_sni(false));
+    }
+
+    #[test]
+    fn failure_report_keeps_every_ech_attempt() {
+        let lookup = linux_do_lookup_with_poisoned_a();
+        let report = format_failure_report(
+            true,
+            &lookup,
+            &[
+                AttemptRecord {
+                    ip: "104.20.16.234".parse().unwrap(),
+                    kind: AttemptKind::Ech,
+                    error: "peer closed connection in violation of protocol".into(),
+                },
+                AttemptRecord {
+                    ip: "172.66.166.61".parse().unwrap(),
+                    kind: AttemptKind::Ech,
+                    error: "Connection reset by peer (os error 54)".into(),
+                },
+            ],
         );
+        let compiled = if crate::dexo_doh_gateway_ech_compiled() != 0 {
+            "yes"
+        } else {
+            "no"
+        };
+        assert_eq!(
+            report,
+            format!(
+                "compiled={compiled} ech_rr=yes A=104.20.16.234,172.66.166.61; \
+                 104.20.16.234 ECH: peer closed connection in violation of protocol; \
+                 172.66.166.61 ECH: connection reset"
+            )
+        );
+        assert!(!report.contains("ech=no"));
+        assert!(!report.contains("visible"));
+    }
+
+    #[test]
+    fn failure_report_visible_only_without_ech_rr() {
+        let lookup = crate::dns::Lookup {
+            ipv4: vec!["1.2.3.4".parse().unwrap()],
+            ipv6: Vec::new(),
+            https: Vec::new(),
+        };
+        let report = format_failure_report(
+            false,
+            &lookup,
+            &[AttemptRecord {
+                ip: "1.2.3.4".parse().unwrap(),
+                kind: AttemptKind::Visible,
+                error: "Connection reset by peer (os error 54)".into(),
+            }],
+        );
+        assert!(report.contains("ech_rr=no"));
+        assert!(report.contains("1.2.3.4 visible: connection reset"));
+        assert!(!report.contains("ECH:"));
     }
 }

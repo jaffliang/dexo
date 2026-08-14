@@ -36,15 +36,17 @@ pub fn encode_query(id: u16, name: &str, record_type: u16) -> Result<Vec<u8>, &'
     Ok(message)
 }
 
-pub fn decode_lookup(message: &[u8], expected_id: u16) -> Result<Lookup, &'static str> {
+pub fn decode_lookup(message: &[u8], _expected_id: u16) -> Result<Lookup, &'static str> {
     if message.len() < 12 {
         return Err("truncated dns header");
     }
-    let id = u16::from_be_bytes([message[0], message[1]]);
-    if id != expected_id {
-        return Err("dns id mismatch");
-    }
     let flags = u16::from_be_bytes([message[2], message[3]]);
+    // Some DoH servers rewrite the query id. Accept the answer anyway as
+    // long as it is a response (QR) with rcode 0 — dropping it would skip
+    // the HTTPS RR and force A-only / visible SNI.
+    if flags & 0x8000 == 0 {
+        return Err("dns not a response");
+    }
     if flags & 0x000F != 0 {
         return Err("dns response error");
     }
@@ -309,9 +311,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_id() {
+    fn accepts_rewritten_id_when_response_ok() {
+        let query = encode_query(0x1234, "linux.do", TYPE_A).unwrap();
+        let mut answer = query.clone();
+        answer[0] = 0xAB;
+        answer[1] = 0xCD;
+        answer[2] = 0x81;
+        answer[3] = 0x80;
+        answer[6] = 0;
+        answer[7] = 1;
+        answer.extend_from_slice(&[
+            0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 1, 2, 3, 4,
+        ]);
+        let lookup = decode_lookup(&answer, 0x1234).expect("rewritten id must still parse");
+        assert_eq!(lookup.ipv4, vec![Ipv4Addr::new(1, 2, 3, 4)]);
+    }
+
+    #[test]
+    fn rejects_query_or_nonzero_rcode() {
         let query = encode_query(1, "example.com", TYPE_A).unwrap();
-        assert!(decode_lookup(&query, 2).is_err());
+        assert_eq!(decode_lookup(&query, 2).unwrap_err(), "dns not a response");
+
+        let mut servfail = query.clone();
+        servfail[2] = 0x81;
+        servfail[3] = 0x82; // QR + SERVFAIL
+        assert_eq!(decode_lookup(&servfail, 1).unwrap_err(), "dns response error");
+    }
+
+    #[test]
+    fn linux_do_https_survives_id_rewrite() {
+        let mut message = hex(
+            "111181800001000100000000056c696e757802646f0000410001c00c004100010000012c0088\
+             0001000001000602683302683200040008681410eaac42a63d000500470045fe0d0041b50020\
+             0020121ae8bca202378d31efc2e5db4cce83f4a8ed582ec5e043b69e362c42e7ab0f00040001\
+             00010012636c6f7564666c6172652d6563682e636f6d00000006002026064700001000000000\
+             0000681410ea260647000010000000000000ac42a63d",
+        );
+        message[0] = 0x00;
+        message[1] = 0x01;
+        let lookup = decode_lookup(&message, 0x1111).expect("HTTPS RR after id rewrite");
+        assert_eq!(lookup.https.len(), 1);
+        assert!(lookup.https[0].ech_config.is_some());
     }
 
     fn hex(input: &str) -> Vec<u8> {
