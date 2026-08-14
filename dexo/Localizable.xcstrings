@@ -6385,34 +6385,18 @@
         }
       }
     },
-    "read_timings.countdown.complete" : {
+    "read_timings.unread_dot" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Post marked as read"
+            "value" : "Unread"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "帖子已计为已读"
-          }
-        }
-      }
-    },
-    "read_timings.countdown.remaining %lld" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld seconds remaining until this post is read"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "距本帖计为已读还剩 %lld 秒"
+            "value" : "未读"
           }
         }
       }

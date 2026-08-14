@@ -32,11 +32,12 @@ struct TopicTimingCircuitBreaker {
             blockedUntil = nil
             return false
         }
+        guard ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) else {
+            return false
+        }
         let delay = ReadTimingAlgorithm.retryDelay(afterFailureCount: failureCount)
         failureCount += 1
-        if ReadTimingAlgorithm.isRetryable(statusCode: statusCode, outcome: outcome) {
-            blockedUntil = now.addingTimeInterval(delay)
-        }
+        blockedUntil = now.addingTimeInterval(delay)
         return false
     }
 
@@ -895,6 +896,7 @@ final class DiscourseAPI {
         }
         lastTopicTimingsReportingEnabled = reportingEnabled
         guard reportingEnabled else { return }
+        guard AuthManager.shared.isAuthenticated(for: baseURL) else { return }
         if topicTimingsCircuitBreaker.isBlocked {
             let delay = topicTimingsCircuitBreaker.remainingBackoff
             debugLog("[DiscourseAPI] timings: waiting \(Int(delay))s before retry")
@@ -975,10 +977,7 @@ final class DiscourseAPI {
             } else {
                 postReadTimingsStatus(.failed(summary: summary))
             }
-            throw DiscourseAPIError(
-                messages: [summary],
-                errorType: assessment.outcome == .cloudflareChallenge ? "challenge_required" : nil
-            )
+            throw TopicTimingRequestError(assessment: assessment)
         }
     }
 
@@ -1261,6 +1260,18 @@ final class DiscourseAPI {
 
 struct TopicTimingBackoffError: Error, Equatable {
     let delay: TimeInterval
+}
+
+struct TopicTimingRequestError: Error, Equatable {
+    let assessment: TopicTimingResponseAssessment
+
+    var isRetryable: Bool {
+        ReadTimingAlgorithm.isRetryable(statusCode: assessment.statusCode, outcome: assessment.outcome)
+    }
+
+    var isCloudflareChallenge: Bool {
+        assessment.outcome == .cloudflareChallenge
+    }
 }
 
 extension Notification.Name {

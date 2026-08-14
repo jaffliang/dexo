@@ -6,7 +6,9 @@ import Foundation
 /// Behavior is rewritten from FluxDO's ScreenTrack rules:
 /// per-post visible time, `topic_time`, 60s flush, rush-flush of newly seen
 /// posts, 3-minute idle pause, 6-minute per-post cap, and freeze while a
-/// Cloudflare challenge is in progress. Failed payloads stay queued.
+/// Cloudflare challenge is in progress. Failed retryable payloads stay queued.
+/// A post's unread dot clears only after a successful send (or the server
+/// already marked it read).
 ///
 /// `nonisolated` to dodge the iOS 26 back-deploy
 /// `swift_task_deinitOnExecutorMainActorBackDeploy` crash for MainActor
@@ -17,11 +19,12 @@ nonisolated final class TopicReadTracker {
     private var visibleStarts: [Int: CFTimeInterval] = [:]
     private var elapsedByPost: [Int: Int] = [:]
     private var totalSentByPost: [Int: Int] = [:]
-    private var wordCountByPost: [Int: Int] = [:]
-    private var alreadyReadPosts: Set<Int> = []
+    private var serverReadPosts: Set<Int> = []
+    private var sessionReadPosts: Set<Int> = []
     private var sessionStart: CFTimeInterval?
     private var sessionAccumulated: Int = 0
     private var lastScrolled: CFTimeInterval
+    private var lastFlush: CFTimeInterval
     private var hasFocus = true
     private var isFrozen = false
     private var inFlightTopicTime = 0
@@ -29,7 +32,9 @@ nonisolated final class TopicReadTracker {
 
     init(now: @escaping @Sendable () -> CFTimeInterval = { CACurrentMediaTime() }) {
         self.now = now
-        lastScrolled = now()
+        let timestamp = now()
+        lastScrolled = timestamp
+        lastFlush = timestamp
     }
 
     /// Begin / resume the topic-level timer. Idempotent.
@@ -52,12 +57,8 @@ nonisolated final class TopicReadTracker {
         addElapsed(postNumber: postNumber, elapsed: msSince(start))
     }
 
-    func setWordCount(_ wordCount: Int, forPostNumber postNumber: Int) {
-        wordCountByPost[postNumber] = max(0, wordCount)
-    }
-
     func markServerRead(_ postNumber: Int) {
-        alreadyReadPosts.insert(postNumber)
+        serverReadPosts.insert(postNumber)
     }
 
     func markScrolled() {
@@ -114,7 +115,7 @@ nonisolated final class TopicReadTracker {
     }
 
     /// Snapshot the unsent delta. Visible cells keep ticking. Data stays
-    /// queued until `commitSend()` so a failed POST can be retried.
+    /// queued until `commitSend()` so a failed retryable POST can be retried.
     func snapshotDelta() -> (topicTime: Int, timings: [Int: Int]) {
         harvestVisible()
         let topicTime = sessionAccumulated + inFlightTopicTime
@@ -127,12 +128,14 @@ nonisolated final class TopicReadTracker {
         inFlightTimings = timings
         sessionAccumulated = 0
         elapsedByPost = [:]
+        lastFlush = now()
         return (topicTime, timings)
     }
 
     func commitSend() {
         for (postNumber, milliseconds) in inFlightTimings {
             totalSentByPost[postNumber, default: 0] += milliseconds
+            sessionReadPosts.insert(postNumber)
         }
         inFlightTopicTime = 0
         inFlightTimings = [:]
@@ -142,44 +145,40 @@ nonisolated final class TopicReadTracker {
         // Keep `inFlight*` so the next snapshot consolidates the same payload.
     }
 
-    func accumulatedMs(forPostNumber postNumber: Int) -> Int {
-        liveElapsed(for: postNumber)
-            + elapsedByPost[postNumber, default: 0]
-            + inFlightTimings[postNumber, default: 0]
-            + totalSentByPost[postNumber, default: 0]
+    func dropInFlight() {
+        inFlightTopicTime = 0
+        inFlightTimings = [:]
     }
 
-    func remainingReadTimeMs(forPostNumber postNumber: Int) -> Int {
-        if alreadyReadPosts.contains(postNumber) { return 0 }
-        return ReadTimingAlgorithm.remainingReadTimeMs(
-            wordCount: wordCountByPost[postNumber, default: 0],
-            accumulatedMs: accumulatedMs(forPostNumber: postNumber)
-        )
+    /// `!post.read && !readInThisSession`
+    func showsUnreadDot(postNumber: Int, serverRead: Bool) -> Bool {
+        if serverRead || serverReadPosts.contains(postNumber) { return false }
+        return !sessionReadPosts.contains(postNumber)
     }
 
-    func countdownState(forPostNumber postNumber: Int) -> ReadTimingCountdownState {
-        if alreadyReadPosts.contains(postNumber) { return .hidden }
-        let remaining = remainingReadTimeMs(forPostNumber: postNumber)
-        return remaining == 0 ? .complete : .remaining(ms: remaining)
-    }
-
-    func isPostRead(_ postNumber: Int) -> Bool {
-        remainingReadTimeMs(forPostNumber: postNumber) == 0
-    }
-
-    /// True when a newly seen unread post has accumulated its first tick and
-    /// has not been successfully reported yet (FluxDO "rush" flush).
+    /// True when a post has accumulated time and has never been sent.
     func shouldRushFlush() -> Bool {
         guard !isFrozen else { return false }
-        return pendingTimings.contains { postNumber, milliseconds in
-            milliseconds >= ReadTimingAlgorithm.tickIntervalMs
-                && totalSentByPost[postNumber] == nil
-                && !alreadyReadPosts.contains(postNumber)
+        for (postNumber, milliseconds) in elapsedByPost where milliseconds > 0 {
+            if totalSentByPost[postNumber] == nil { return true }
         }
+        for postNumber in visibleStarts.keys {
+            let live = liveElapsed(for: postNumber)
+            if live > 0, totalSentByPost[postNumber] == nil, inFlightTimings[postNumber] == nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    func shouldPeriodicFlush() -> Bool {
+        guard !isFrozen else { return false }
+        let elapsed = (now() - lastFlush) * 1000
+        return elapsed >= Double(ReadTimingAlgorithm.flushIntervalMs) && hasUnsentDelta()
     }
 
     func hasUnsentDelta() -> Bool {
-        pendingTimings.contains { $0.value >= ReadTimingAlgorithm.tickIntervalMs }
+        pendingTimings.contains { $0.value > 0 }
     }
 
     private func harvestVisible() {
@@ -222,7 +221,7 @@ nonisolated final class TopicReadTracker {
 
     /// Caps cumulative *sent + pending* at MAX_TRACKING_TIME (6 min).
     private func addElapsed(postNumber: Int, elapsed: Int) {
-        guard elapsed >= ReadTimingAlgorithm.tickIntervalMs else { return }
+        guard elapsed > 0 else { return }
         let pending = elapsedByPost[postNumber, default: 0]
         let alreadySent = totalSentByPost[postNumber, default: 0] + inFlightTimings[postNumber, default: 0]
         let remaining = max(0, ReadTimingAlgorithm.maxTrackingMs - pending - alreadySent)

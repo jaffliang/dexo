@@ -262,7 +262,7 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
     private let replyReferenceLabel = UILabel()
     private let timeLabel = UILabel()
     private let floorLabel = UILabel()
-    private let readCountdown = ReadTimingCountdownView()
+    private let unreadTimingDot = ReadTimingUnreadDot()
     private let treeLineView = TreeLineView()
     private var avatarLeadingConstraint: NSLayoutConstraint!
     private var avatarWidthConstraint: NSLayoutConstraint!
@@ -304,7 +304,9 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         contentView.addSubview(flair)
         contentView.addSubview(userTitleLabel)
         contentView.addSubview(replyReferenceLabel)
-        contentView.addSubview(readCountdown)
+        contentView.addSubview(unreadTimingDot)
+        clipsToBounds = false
+        contentView.clipsToBounds = false
 
         avatarLeadingConstraint = avatar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12)
         avatarWidthConstraint = avatar.widthAnchor.constraint(equalToConstant: 32)
@@ -335,10 +337,10 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
             replyReferenceLabel.centerYAnchor.constraint(equalTo: floorLabel.centerYAnchor),
             timeLabel.trailingAnchor.constraint(equalTo: floorLabel.trailingAnchor),
             timeLabel.topAnchor.constraint(equalTo: floorLabel.bottomAnchor, constant: 2),
-            floorLabel.trailingAnchor.constraint(equalTo: readCountdown.leadingAnchor, constant: -4),
+            floorLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             floorLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            readCountdown.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            readCountdown.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
+            unreadTimingDot.trailingAnchor.constraint(equalTo: timeLabel.trailingAnchor, constant: 6),
+            unreadTimingDot.topAnchor.constraint(equalTo: timeLabel.topAnchor, constant: -2),
         ])
     }
 
@@ -350,7 +352,7 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         baseURL: String,
         isOP: Bool,
         treeState: TreeLineState?,
-        countdownState: ReadTimingCountdownState = .hidden
+        showsUnreadDot: Bool = false
     ) {
         backgroundColor = ThemeManager.shared.cardBackgroundColor
         contentView.backgroundColor = ThemeManager.shared.cardBackgroundColor
@@ -464,19 +466,19 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
             replyReferenceLabel.isHidden = true
             timeLabel.isHidden = true
             floorLabel.isHidden = true
-            self.readCountdown.apply(.hidden)
+            self.unreadTimingDot.apply(showsDot: false, animated: false)
             avatar.sd_cancelCurrentImageLoad()
             avatar.image = nil
             flair.isHidden = true
         } else {
             usernameLabel.isHidden = false
             timeLabel.isHidden = false
-            updateReadCountdown(countdownState)
+            updateUnreadDot(shows: showsUnreadDot, animated: false)
         }
     }
 
-    func updateReadCountdown(_ state: ReadTimingCountdownState) {
-        readCountdown.apply(state)
+    func updateUnreadDot(shows: Bool, animated: Bool) {
+        unreadTimingDot.apply(showsDot: shows, animated: animated)
     }
 
     override func prepareForReuse() {
@@ -488,7 +490,7 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         flair.isHidden = true
         replyReferenceLabel.attributedText = nil
         replyReferenceLabel.isHidden = true
-        readCountdown.apply(.hidden)
+        unreadTimingDot.apply(showsDot: false, animated: false)
         onAvatar = nil
         onReplyReference = nil
     }

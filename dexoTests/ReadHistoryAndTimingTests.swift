@@ -269,10 +269,10 @@ final class TopicTimingPolicyTests: XCTestCase {
         settings.linuxDoReadTimingsEnabled = true
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
-        XCTAssertTrue(ForumPolicy.showsReadTimingCountdown(baseURL: "https://linux.do"))
-        XCTAssertFalse(ForumPolicy.showsReadTimingCountdown(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com"))
         settings.linuxDoReadTimingsEnabled = false
-        XCTAssertFalse(ForumPolicy.showsReadTimingCountdown(baseURL: "https://linux.do"))
+        XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do"))
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
@@ -333,7 +333,9 @@ final class TopicTimingPolicyTests: XCTestCase {
 
         var breaker = TopicTimingCircuitBreaker()
         XCTAssertFalse(breaker.record(.failure, statusCode: 403))
+        XCTAssertFalse(breaker.isBlocked)
         XCTAssertFalse(breaker.record(.cloudflareChallenge, statusCode: 403))
+        XCTAssertFalse(breaker.isBlocked)
         XCTAssertFalse(breaker.record(.failure, statusCode: 429))
         XCTAssertFalse(breaker.record(.failure, statusCode: 503))
         XCTAssertFalse(breaker.record(.failure))
@@ -361,30 +363,18 @@ final class ReadTimingAlgorithmTests: XCTestCase {
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 1), 10)
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 2), 20)
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 3), 40)
-        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 403, outcome: .failure))
+        XCTAssertEqual(ReadTimingAlgorithm.flushIntervalMs, 60_000)
+        XCTAssertEqual(
+            ReadTimingAlgorithm.retryableStatusCodes,
+            [405, 429, 500, 501, 502, 503, 504]
+        )
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 403, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 405, outcome: .failure))
         XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 429, outcome: .failure))
-        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: nil, outcome: .failure))
-        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 200, outcome: .cloudflareChallenge))
-    }
-
-    func testRemainingTimeFromWordCountUsesDiscourseWordsPerMinute() {
-        XCTAssertEqual(ReadTimingAlgorithm.wordsPerMinute, 500)
-        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 500), 60_000)
-        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 250), 30_000)
-        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 500, accumulatedMs: 15_000), 45_000)
-        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 100, accumulatedMs: 0), 12_000)
-    }
-
-    func testCountdownHitsZeroAtFluxDOFirstTickThreshold() {
-        // FluxDO rush-flushes an unread post after the first 1s tick.
-        XCTAssertEqual(ReadTimingAlgorithm.tickIntervalMs, 1_000)
-        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 0), 1_000)
-        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 8), 1_000)
-        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 0, accumulatedMs: 999), 1)
-        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 0, accumulatedMs: 1_000), 0)
-        XCTAssertTrue(ReadTimingAlgorithm.isRead(wordCount: 8, accumulatedMs: 1_000))
-        XCTAssertFalse(ReadTimingAlgorithm.isRead(wordCount: 500, accumulatedMs: 1_000))
-        XCTAssertTrue(ReadTimingAlgorithm.isRead(wordCount: 500, accumulatedMs: 60_000))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 500, outcome: .failure))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: nil, outcome: .failure))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 200, outcome: .cloudflareChallenge))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 503, outcome: .cloudflareChallenge))
     }
 
     func testFormEncodingUsesTimingsPostNumberKeys() {
@@ -407,28 +397,67 @@ final class ReadTimingAlgorithmTests: XCTestCase {
         XCTAssertNil(parameters["timings"])
     }
 
-    func testTrackerCountdownReachesZeroAtRequiredThreshold() {
+    func testUnreadDotClearsOnlyAfterSuccessfulSendOrServerRead() {
         let clock = ManualReadTimingClock(time: 100)
         let tracker = TopicReadTracker(now: { clock.time })
         tracker.startSession()
-        tracker.setWordCount(0, forPostNumber: 1)
+
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 2, serverRead: true))
+        tracker.markServerRead(3)
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 3, serverRead: false))
+
         tracker.recordVisible(postNumber: 1)
-
-        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 1_000)
-        clock.time += 0.5
-        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 500)
-        clock.time += 0.5
-        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 0)
-        XCTAssertTrue(tracker.isPostRead(1))
+        clock.time += 1
         XCTAssertTrue(tracker.shouldRushFlush())
-        XCTAssertEqual(tracker.countdownState(forPostNumber: 1), .complete)
+        XCTAssertFalse(tracker.shouldPeriodicFlush())
+        let snapshot = tracker.snapshotDelta()
+        XCTAssertEqual(snapshot.timings[1], 1_000)
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
 
-        tracker.markServerRead(2)
-        XCTAssertEqual(tracker.countdownState(forPostNumber: 2), .hidden)
+        tracker.commitSend()
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        XCTAssertFalse(tracker.shouldRushFlush())
     }
 
-    func testPostWordCountFallsBackToCookedText() throws {
-        let post = try JSONDecoder().decode(
+    func testPeriodicFlushWaitsSixtySecondsAfterASend() {
+        let clock = ManualReadTimingClock(time: 0)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 1)
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+        _ = tracker.snapshotDelta()
+        tracker.commitSend()
+
+        clock.time += 1
+        XCTAssertFalse(tracker.shouldRushFlush())
+        XCTAssertFalse(tracker.shouldPeriodicFlush())
+        clock.time += 59
+        XCTAssertTrue(tracker.shouldPeriodicFlush())
+    }
+
+    func testInFlightSnapshotConsolidatesAndNonRetryableDropDoesNotMarkRead() {
+        let clock = ManualReadTimingClock(time: 0)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 4)
+        clock.time += 1
+        let first = tracker.snapshotDelta()
+        XCTAssertEqual(first.timings[4], 1_000)
+
+        clock.time += 1
+        let second = tracker.snapshotDelta()
+        XCTAssertEqual(second.timings[4], 2_000)
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 4, serverRead: false))
+
+        tracker.dropInFlight()
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 4, serverRead: false))
+        XCTAssertFalse(tracker.hasUnsentDelta())
+    }
+
+    func testPostReadFlagDecodesWithoutWordCount() throws {
+        let unread = try JSONDecoder().decode(
             DiscourseTopicDetail.Post.self,
             from: Data("""
             {
@@ -437,10 +466,9 @@ final class ReadTimingAlgorithmTests: XCTestCase {
             }
             """.utf8)
         )
-        XCTAssertEqual(post.wordCount, 2)
-        XCTAssertFalse(post.read)
+        XCTAssertFalse(unread.read)
 
-        let counted = try JSONDecoder().decode(
+        let alreadyRead = try JSONDecoder().decode(
             DiscourseTopicDetail.Post.self,
             from: Data("""
             {
@@ -450,7 +478,6 @@ final class ReadTimingAlgorithmTests: XCTestCase {
             }
             """.utf8)
         )
-        XCTAssertEqual(counted.wordCount, 42)
-        XCTAssertTrue(counted.read)
+        XCTAssertTrue(alreadyRead.read)
     }
 }

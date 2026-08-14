@@ -104,6 +104,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private var readTickTimer: Timer?
     private var pendingReadFlush: DispatchWorkItem?
     private var isFlushingReadTimings = false
+    private var hasPendingReadFlush = false
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
     private static let readTickInterval: TimeInterval = 1
@@ -173,7 +174,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
                 baseURL: self.baseURL,
                 isOP: post.username == self.viewModel.opUsername,
                 treeState: self.viewModel.isTreeMode ? self.viewModel.postTreeLineStates[postId] : nil,
-                countdownState: self.readCountdownState(for: post)
+                showsUnreadDot: self.showsUnreadTimingDot(for: post)
             )
             cell.onAvatar = { [weak self] in self?.postCell(didTapAvatarForUsername: $0) }
             cell.onReplyReference = { [weak self] in self?.postCell(didTapReplyReferenceForPost: post) }
@@ -720,33 +721,32 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
             prepareReadTracking(for: post)
             readTracker.recordVisible(postNumber: post.postNumber)
         }
-        refreshVisibleReadCountdowns()
+        refreshVisibleUnreadDots(animated: false)
     }
 
     private func prepareReadTracking(for post: DiscourseTopicDetail.Post) {
-        readTracker.setWordCount(post.wordCount, forPostNumber: post.postNumber)
         if post.read {
             readTracker.markServerRead(post.postNumber)
         }
     }
 
-    private func readCountdownState(for post: DiscourseTopicDetail.Post) -> ReadTimingCountdownState {
-        guard ForumPolicy.showsReadTimingCountdown(baseURL: baseURL),
+    private func showsUnreadTimingDot(for post: DiscourseTopicDetail.Post) -> Bool {
+        guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL),
               !post.deletedPostPlaceholder
-        else { return .hidden }
+        else { return false }
         prepareReadTracking(for: post)
-        return readTracker.countdownState(forPostNumber: post.postNumber)
+        return readTracker.showsUnreadDot(postNumber: post.postNumber, serverRead: post.read)
     }
 
-    private func refreshVisibleReadCountdowns() {
-        guard ForumPolicy.showsReadTimingCountdown(baseURL: baseURL) else { return }
+    private func refreshVisibleUnreadDots(animated: Bool) {
+        guard ForumPolicy.showsReadTimingUnreadDot(baseURL: baseURL) else { return }
         for indexPath in collectionView.indexPathsForVisibleItems {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   case .header(let postId) = item,
                   let post = viewModel.postsById[postId],
                   let cell = collectionView.cellForItem(at: indexPath) as? VirtualPostHeaderCell
             else { continue }
-            cell.updateReadCountdown(readCountdownState(for: post))
+            cell.updateUnreadDot(shows: showsUnreadTimingDot(for: post), animated: animated)
         }
     }
 
@@ -768,8 +768,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         stopReadTickTimer()
         let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.refreshVisibleReadCountdowns()
-            if self.readTracker.shouldRushFlush() {
+            if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
                 self.flushReadTimings()
             }
         }
@@ -798,7 +797,13 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     }
 
     private func flushReadTimings() {
-        guard !isFlushingReadTimings else { return }
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
+              AuthManager.shared.isAuthenticated(for: api.baseURL)
+        else { return }
+        if isFlushingReadTimings {
+            hasPendingReadFlush = true
+            return
+        }
         let snapshot = readTracker.snapshotDelta()
         guard !snapshot.timings.isEmpty else { return }
         isFlushingReadTimings = true
@@ -813,26 +818,43 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
                 )
                 await MainActor.run {
                     self?.readTracker.commitSend()
-                    self?.isFlushingReadTimings = false
-                    self?.refreshVisibleReadCountdowns()
+                    self?.refreshVisibleUnreadDots(animated: true)
+                    self?.finishReadFlush()
                 }
             } catch is TopicTimingBackoffError {
                 await MainActor.run {
                     self?.readTracker.revertSend()
-                    self?.isFlushingReadTimings = false
+                    self?.finishReadFlush()
                 }
-            } catch let error as DiscourseAPIError where error.errorType == "challenge_required" {
+            } catch let error as TopicTimingRequestError where error.isCloudflareChallenge {
                 await MainActor.run {
                     self?.readTracker.freezeForChallenge()
-                    self?.isFlushingReadTimings = false
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isRetryable {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as DiscourseAPIError where error.isChallengeRequired {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
                 }
             } catch {
                 await MainActor.run {
-                    self?.readTracker.revertSend()
-                    self?.isFlushingReadTimings = false
+                    self?.readTracker.dropInFlight()
+                    self?.finishReadFlush()
                 }
             }
         }
+    }
+
+    private func finishReadFlush() {
+        isFlushingReadTimings = false
+        guard hasPendingReadFlush else { return }
+        hasPendingReadFlush = false
+        flushReadTimings()
     }
 
     private func handleLoadErrorIfNeeded() {
