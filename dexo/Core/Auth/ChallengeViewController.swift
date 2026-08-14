@@ -73,18 +73,38 @@ final class ChallengeViewController: BaseViewController {
         config.userContentController.addUserScript(darkModeCSS)
         // Keep the shared store; replacing it with `.default()` would split
         // TLS/JA3 from password-login fetches that reuse this jar.
-        let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(config)
+        if #available(iOS 17.0, *) {
+            let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(config)
+            return (config, lease)
+        }
+        let lease = await WebViewDoHConfigurator.attachLegacyChallengeRouting(config)
         return (config, lease)
     }
 
-    private lazy var coordinator = Coordinator(onNavigationFinished: { [weak self] in
-        self?.syncCookies()
-    })
+    private lazy var coordinator = Coordinator(
+        onNavigationFinished: { [weak self] in
+            self?.hideLoadError()
+            self?.syncCookies()
+        },
+        onNavigationFailed: { [weak self] error in
+            self?.showLoadError(error)
+        }
+    )
 
     private lazy var progressView: UIProgressView = {
         let pv = UIProgressView(progressViewStyle: .bar)
         pv.translatesAutoresizingMaskIntoConstraints = false
         return pv
+    }()
+
+    private lazy var attachErrorBanner: UILabel = {
+        let label = UILabel()
+        label.font = FontManager.shared.font(size: 13)
+        label.textAlignment = .left
+        label.numberOfLines = 0
+        label.isHidden = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
     }()
 
     private var progressObservation: NSKeyValueObservation?
@@ -111,11 +131,16 @@ final class ChallengeViewController: BaseViewController {
         navigationItem.rightBarButtonItem?.isEnabled = false
 
         view.addSubview(progressView)
+        view.addSubview(attachErrorBanner)
         NSLayoutConstraint.activate([
             progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            attachErrorBanner.topAnchor.constraint(equalTo: progressView.bottomAnchor, constant: 8),
+            attachErrorBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            attachErrorBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
         ])
+        applyChallengeTheme()
 
         setupTask = Task { [weak self] in
             await self?.setUpWebView()
@@ -132,7 +157,7 @@ final class ChallengeViewController: BaseViewController {
             webView.navigationDelegate = coordinator
             webView.uiDelegate = coordinator
             webView.isOpaque = false
-            webView.backgroundColor = .systemBackground
+            webView.backgroundColor = ThemeManager.shared.backgroundColor
             if let userAgent {
                 webView.customUserAgent = userAgent
             }
@@ -146,6 +171,7 @@ final class ChallengeViewController: BaseViewController {
                 webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                 webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             ])
+            view.bringSubviewToFront(attachErrorBanner)
 
             progressObservation = webView.observe(\.estimatedProgress, options: .new) { [weak self] webView, _ in
                 self?.progressView.progress = Float(webView.estimatedProgress)
@@ -165,11 +191,28 @@ final class ChallengeViewController: BaseViewController {
             guard !Task.isCancelled else { return }
             webView.configuration.websiteDataStore.httpCookieStore.add(coordinator)
             isObservingCookieChanges = true
+            if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: lease) {
+                showAttachWarning(warning)
+            }
             webView.load(URLRequest(url: targetURL))
         } catch {
             guard !Task.isCancelled else { return }
             showProxyUnavailableAlert()
         }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        applyChallengeTheme()
+    }
+
+    private func applyChallengeTheme() {
+        let theme = ThemeManager.shared
+        view.backgroundColor = theme.backgroundColor
+        attachErrorBanner.textColor = UIColor.secondaryLabel
+        attachErrorBanner.backgroundColor = theme.backgroundColor
+        webView?.backgroundColor = theme.backgroundColor
+        navigationController?.navigationBar.tintColor = theme.accentColor
     }
 
     private func showProxyUnavailableAlert() {
@@ -223,6 +266,42 @@ final class ChallengeViewController: BaseViewController {
         }
     }
 
+    private func showAttachWarning(_ error: Error) {
+        attachErrorBanner.text = String(
+            format: String(localized: "challenge.doh_attach_failed.message %@"),
+            WebViewChallengeDoHDiagnostics.detail(for: error)
+        )
+        attachErrorBanner.isHidden = false
+        view.bringSubviewToFront(attachErrorBanner)
+        applyChallengeTheme()
+    }
+
+    fileprivate func showLoadError(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        attachErrorBanner.text = String(
+            format: String(localized: "challenge.load_failed.message %@"),
+            WebViewChallengeDoHDiagnostics.detail(for: error)
+        )
+        attachErrorBanner.isHidden = false
+        view.bringSubviewToFront(attachErrorBanner)
+        applyChallengeTheme()
+    }
+
+    private func hideLoadError() {
+        if WebViewDoHConfigurator.legacyAttachWarning(from: proxyLease) != nil {
+            return
+        }
+        attachErrorBanner.isHidden = true
+    }
+
+    private func releaseChallengeDoHSession() {
+        (proxyLease as? WebViewLegacyChallengeSession)?.release()
+        proxyLease = nil
+    }
+
     @objc private func cancelTapped() {
         setupTask?.cancel()
         syncAndDismiss()
@@ -237,6 +316,7 @@ final class ChallengeViewController: BaseViewController {
         isFinalCookieSyncInProgress = true
         Task { @MainActor in
             await syncWebSession()
+            releaseChallengeDoHSession()
             dismiss(animated: true) { [weak self] in
                 self?.resumeWaitIfNeeded()
             }
@@ -267,6 +347,11 @@ final class ChallengeViewController: BaseViewController {
         if view.window == nil, isObservingCookieChanges {
             webView?.configuration.websiteDataStore.httpCookieStore.remove(coordinator)
             isObservingCookieChanges = false
+        }
+        if view.window == nil,
+           isBeingDismissed || navigationController?.isBeingDismissed == true || presentingViewController == nil
+        {
+            releaseChallengeDoHSession()
         }
         // Swipe-to-dismiss / interactive sheet paths may not go through
         // syncAndDismiss's completion handler; still unblock awaiters.
@@ -343,11 +428,15 @@ final class ChallengeViewController: BaseViewController {
 
     private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
         private let onNavigationFinished: () -> Void
-        private let trustEvaluator: WebViewProxyTrustEvaluator?
+        private let onNavigationFailed: (Error) -> Void
+        private var trustEvaluator: WebViewProxyTrustEvaluator?
 
-        init(onNavigationFinished: @escaping () -> Void) {
+        init(
+            onNavigationFinished: @escaping () -> Void,
+            onNavigationFailed: @escaping (Error) -> Void
+        ) {
             self.onNavigationFinished = onNavigationFinished
-            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+            self.onNavigationFailed = onNavigationFailed
         }
 
         func webView(
@@ -355,6 +444,9 @@ final class ChallengeViewController: BaseViewController {
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
+            if trustEvaluator == nil {
+                trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+            }
             if let credential = trustEvaluator?.credential(for: challenge) {
                 #if DEBUG
                 print("[WebViewDoHProxy] Challenge accepted proxy CA for \(challenge.protectionSpace.host)")
@@ -367,6 +459,18 @@ final class ChallengeViewController: BaseViewController {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             onNavigationFinished()
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onNavigationFailed(error)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            onNavigationFailed(error)
         }
 
         func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

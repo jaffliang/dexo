@@ -193,6 +193,7 @@ final class PasswordLoginWebSession {
     private var clearancePollTask: Task<Void, Never>?
     private var navigationContinuation: CheckedContinuation<Void, Error>?
     private var originTimeoutTask: Task<Void, Never>?
+    private var challengeDoHSession: AnyObject?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -205,10 +206,13 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // Skip DoH MITM so Cloudflare + hCaptcha stay on system DNS/TLS
-        // (no-op on iOS 15). Login API traffic uses URLSession instead.
+        // iOS 17: skip CONNECT MITM so Turnstile / hCaptcha stay end-to-end.
+        // iOS 15: register http/https with WKBrowsingContextController so
+        // robots.txt + CF interstitial reuse the URLSession DoH gateway.
         if #available(iOS 17.0, *) {
             wkConfig.websiteDataStore.proxyConfigurations = []
+        } else {
+            challengeDoHSession = await WebViewDoHConfigurator.attachLegacyChallengeRouting(wkConfig)
         }
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
@@ -338,9 +342,9 @@ final class PasswordLoginWebSession {
         return cookies.contains { $0.name == "cf_clearance" }
     }
 
-    /// Loads this forum's Cloudflare interstitial in this session's WKWebView
-    /// (system DNS/TLS). `cf_clearance` is copied to the native jar before
-    /// URLSession csrf / session.json.
+    /// Loads this forum's Cloudflare interstitial in this session's WKWebView.
+    /// On iOS 15 with DoH, traffic uses the URLProtocol gateway. `cf_clearance`
+    /// is copied to the native jar before URLSession csrf / session.json.
     /// Does not present a second `ChallengeViewController`. linux.do uses
     /// `/challenge`; idcflare uses `/login` because `/challenge` is 404.
     func runInPlaceCloudflareChallenge(url: URL) async throws {
@@ -494,6 +498,8 @@ final class PasswordLoginWebSession {
 
     func tearDown() {
         PasswordLoginCrashBreadcrumb.record(.teardown)
+        (challengeDoHSession as? WebViewLegacyChallengeSession)?.release()
+        challengeDoHSession = nil
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
         clearancePollTask?.cancel()

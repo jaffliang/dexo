@@ -1080,6 +1080,22 @@
         }
       }
     },
+    "challenge.doh_attach_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DoH could not be attached to this WebView. The page is still shown.\\n%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法将 DoH 接到此 WebView，页面仍会显示。\\n%@"
+          }
+        }
+      }
+    },
     "challenge.empty.message" : {
       "localizations" : {
         "en" : {
@@ -1092,6 +1108,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此论坛受到 Cloudflare 保护。过盾后即可继续浏览。"
+          }
+        }
+      }
+    },
+    "challenge.load_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The challenge page could not be loaded.\\n%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "验证页无法加载。\\n%@"
           }
         }
       }

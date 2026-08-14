@@ -3,7 +3,8 @@ import Foundation
 /// Discourse password login over URLSession so csrf / hCaptcha create /
 /// `POST /session.json` use the iOS 15 DoH loopback gateway.
 ///
-/// WKWebView stays on system DNS/TLS for Cloudflare and hCaptcha only.
+/// WKWebView: iOS 17 skips CONNECT MITM (Turnstile / hCaptcha stay
+/// end-to-end). iOS 15 reuses the URLSession DoH gateway via custom schemes.
 enum PasswordLoginAPIClient {
     private static let requestTimeout: TimeInterval = 30
 

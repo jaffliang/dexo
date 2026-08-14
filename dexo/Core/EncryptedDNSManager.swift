@@ -15,6 +15,9 @@ final class EncryptedDNSManager {
     /// Seeds preferences and kicks off the gateway off the main thread.
     /// Returns immediately so first paint cannot block on `block_on(probe)`.
     func applyCurrentSettings() {
+        // challenge2 leftover `_setProxyConfiguration:` on the persistent
+        // jars. Clear-only; does not start a CONNECT listener.
+        WebViewLegacyProxyRecovery.clearLeakedProxies()
         AppSettings.shared.seedDefaultDoHServersIfNeeded()
         installOnSharedImageDownloader()
         let settings = AppSettings.shared
@@ -47,6 +50,7 @@ final class EncryptedDNSManager {
         completion: @escaping (Bool) -> Void
     ) {
         prepareSystemResolversForGatewayChange(enabled: enabled)
+        WebViewLegacyProxyRecovery.clearLeakedProxies()
         DoHGatewayRuntime.shared.applyAsync(
             enabled: enabled,
             serverURLString: serverURLString
@@ -67,6 +71,7 @@ final class EncryptedDNSManager {
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         prepareSystemResolversForGatewayChange(enabled: enabled)
+        WebViewLegacyProxyRecovery.clearLeakedProxies()
         guard enabled else {
             DoHGatewayRuntime.shared.stop()
             return true
