@@ -181,6 +181,7 @@ fn decode_content_encoding(encoding: &str, body: Vec<u8>) -> Result<Vec<u8>, Str
         "" | "identity" => Ok(body),
         "gzip" | "x-gzip" => gunzip(&body),
         "deflate" => inflate(&body),
+        "br" | "brotli" => brotli_decode(&body),
         other => Err(format!("unsupported Content-Encoding: {other}")),
     }
 }
@@ -193,6 +194,25 @@ fn gunzip(body: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("gzip decompress failed: {error}"))?;
     if out.len() > MAX_BODY_BYTES {
         return Err("gzip body too large".into());
+    }
+    Ok(out)
+}
+
+fn brotli_decode(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = brotli_decompressor::Decompressor::new(body, 4096);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match decoder.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if out.len().saturating_add(n) > MAX_BODY_BYTES {
+                    return Err("brotli body too large".into());
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            Err(error) => return Err(format!("brotli decompress failed: {error}")),
+        }
     }
     Ok(out)
 }
@@ -529,5 +549,48 @@ mod tests {
         assert!(text.contains("Content-Length: 17"));
         assert!(!text.to_ascii_lowercase().contains("content-encoding"));
         assert!(text.ends_with(r#"{"topic_list":[]}"#));
+    }
+
+    fn brotli_compress(plain: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut compressed, 4096, 5, 22);
+            encoder.write_all(plain).unwrap();
+            encoder.flush().unwrap();
+        }
+        compressed
+    }
+
+    #[test]
+    fn brotli_json_is_decompressed_to_identity() {
+        let json = br#"{"topic_list":[]}"#;
+        let compressed = brotli_compress(json);
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: {}\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&compressed);
+        let rewritten = process_upstream_response(&response, "h2").unwrap();
+        let text = String::from_utf8(rewritten).unwrap();
+        assert!(text.contains("Content-Length: 17"));
+        assert!(!text.to_ascii_lowercase().contains("content-encoding"));
+        assert!(text.ends_with(r#"{"topic_list":[]}"#));
+    }
+
+    #[test]
+    fn brotli_html_challenge_is_detected_after_decode() {
+        let html = b"<html><title>Just a moment...</title></html>";
+        let compressed = brotli_compress(html);
+        let mut response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Encoding: brotli\r\nContent-Length: {}\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&compressed);
+        let error = process_upstream_response(&response, "h2").unwrap_err();
+        assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title=Just a moment...");
+        assert!(!error.contains("unsupported Content-Encoding"));
     }
 }

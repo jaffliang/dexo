@@ -514,7 +514,6 @@ fn encode_upstream_request(request: &ParsedRequest, upstream: &Upstream) -> Vec<
 
 fn forwarded_request_headers(request: &ParsedRequest) -> Vec<(String, String)> {
     let mut headers = Vec::new();
-    let mut has_accept_encoding = false;
     let mut has_content_length = false;
     for (name, value) in &request.headers {
         if is_hop_by_hop(name)
@@ -525,20 +524,44 @@ fn forwarded_request_headers(request: &ParsedRequest) -> Vec<(String, String)> {
             continue;
         }
         if name.eq_ignore_ascii_case("accept-encoding") {
-            has_accept_encoding = true;
+            if let Some(sanitized) = sanitize_accept_encoding(value) {
+                headers.push((name.clone(), sanitized));
+            }
+            continue;
         }
         if name.eq_ignore_ascii_case("content-length") {
             has_content_length = true;
         }
         headers.push((name.clone(), value.clone()));
     }
-    if !has_accept_encoding {
-        headers.push(("Accept-Encoding".into(), "gzip, deflate".into()));
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+    {
+        headers.push(("Accept-Encoding".into(), "gzip, deflate, br".into()));
     }
     if !request.body.is_empty() && !has_content_length {
         headers.push(("Content-Length".into(), request.body.len().to_string()));
     }
     headers
+}
+
+/// Keep gzip/deflate/br. Drop zstd — we cannot decode it this round.
+fn sanitize_accept_encoding(value: &str) -> Option<String> {
+    let parts: Vec<&str> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            let encoding = part.split(';').next().unwrap_or("").trim();
+            !encoding.eq_ignore_ascii_case("zstd")
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
 }
 
 fn host_header(upstream: &Upstream) -> String {
@@ -850,7 +873,7 @@ mod tests {
         assert!(encoded.contains("Accept: application/json"));
         assert!(!encoded.to_ascii_lowercase().contains(HOST_HEADER));
         assert!(!encoded.to_ascii_lowercase().contains("connection: close"));
-        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
+        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate, br"));
     }
 
     #[test]
@@ -858,7 +881,7 @@ mod tests {
         let parsed = request(vec![
             ("Host", "127.0.0.1:1"),
             (HOST_HEADER, "linux.do"),
-            ("Accept-Encoding", "gzip, deflate"),
+            ("Accept-Encoding", "gzip, deflate, br"),
             ("Accept", "application/json"),
         ]);
         let upstream = Upstream {
@@ -867,8 +890,7 @@ mod tests {
         };
         let encoded = String::from_utf8(encode_upstream_request(&parsed, &upstream)).unwrap();
         assert!(encoded.contains("Accept: application/json"));
-        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
-        assert!(!encoded.to_ascii_lowercase().contains("br"));
+        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate, br"));
         assert!(!encoded.to_ascii_lowercase().contains("zstd"));
 
         let injected = request(vec![
@@ -877,7 +899,16 @@ mod tests {
             ("Accept", "application/json"),
         ]);
         let injected = String::from_utf8(encode_upstream_request(&injected, &upstream)).unwrap();
-        assert!(injected.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
+        assert!(injected.to_ascii_lowercase().contains("accept-encoding: gzip, deflate, br"));
+
+        let with_zstd = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ]);
+        let with_zstd = String::from_utf8(encode_upstream_request(&with_zstd, &upstream)).unwrap();
+        assert!(with_zstd.to_ascii_lowercase().contains("accept-encoding: gzip, deflate, br"));
+        assert!(!with_zstd.to_ascii_lowercase().contains("zstd"));
     }
 
     #[test]
@@ -892,7 +923,7 @@ mod tests {
         assert!(!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("connection")));
         assert!(!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("host")));
         assert!(headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("accept-encoding") && value == "gzip, deflate"
+            name.eq_ignore_ascii_case("accept-encoding") && value == "gzip, deflate, br"
         }));
     }
 
