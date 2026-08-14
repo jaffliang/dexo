@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// `WKWebsiteDataStore.default()` or the shared cookie jar.
 + (nullable WKWebsiteDataStore *)makeNonPersistentDataStoreWithHTTPProxyPort:(uint16_t)port
                                                                       error:(NSError * _Nullable * _Nullable)error
-    NS_SWIFT_NAME(makeNonPersistentDataStore(httpProxyPort:error:));
+    NS_SWIFT_NAME(makeNonPersistentDataStore(httpProxyPort:));
 
 /// Clear-only: `_setProxyConfiguration:` with an empty dictionary.
 /// Used to recover leftover process-wide proxies from older builds.

@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import Foundation
 import WebKit
 
@@ -83,7 +84,6 @@ nonisolated enum WebViewCustomProtocolSchemes {
         guard shouldUnregister else { return }
         performOnMain {
             WebViewDoHChallengeSPI.unregisterHTTPAndHTTPSCustomProtocolSchemes()
-            true
         }
     }
 
@@ -92,7 +92,11 @@ nonisolated enum WebViewCustomProtocolSchemes {
         if Thread.isMainThread {
             return work()
         }
-        return DispatchQueue.main.sync(work)
+        var result: T?
+        DispatchQueue.main.sync {
+            result = work()
+        }
+        return result!
     }
 
     nonisolated final class Lease: Sendable {
@@ -183,17 +187,17 @@ extension WebViewDoHConfigurator {
         guard port > 0, port <= Int(UInt16.max) else {
             throw WebViewLegacyChallengeError.isolatedStoreFailed("isolated store port is \(port)")
         }
-        var nsError: NSError?
-        let store = WebViewDoHChallengeSPI.makeNonPersistentDataStore(
-            httpProxyPort: UInt16(port),
-            error: &nsError
-        )
-        if let store {
-            return store
+        do {
+            if let store = try WebViewDoHChallengeSPI.makeNonPersistentDataStore(
+                httpProxyPort: UInt16(port)
+            ) {
+                return store
+            }
+        } catch {
+            throw WebViewLegacyChallengeError.isolatedStoreFailed(error.localizedDescription)
         }
         throw WebViewLegacyChallengeError.isolatedStoreFailed(
-            nsError?.localizedDescription
-                ?? WebViewDoHChallengeSPI.lastFailureReason()
+            WebViewDoHChallengeSPI.lastFailureReason()
                 ?? "isolated WKWebsiteDataStore creation failed"
         )
     }
