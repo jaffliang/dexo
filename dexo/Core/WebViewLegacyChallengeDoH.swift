@@ -188,18 +188,15 @@ extension WebViewDoHConfigurator {
             throw WebViewLegacyChallengeError.isolatedStoreFailed("isolated store port is \(port)")
         }
         do {
-            if let store = try WebViewDoHChallengeSPI.makeNonPersistentDataStore(
+            return try WebViewDoHChallengeSPI.makeNonPersistentDataStore(
                 httpProxyPort: UInt16(port)
-            ) {
-                return store
-            }
+            )
         } catch {
-            throw WebViewLegacyChallengeError.isolatedStoreFailed(error.localizedDescription)
+            throw WebViewLegacyChallengeError.isolatedStoreFailed(
+                WebViewDoHChallengeSPI.lastFailureReason()
+                    ?? error.localizedDescription
+            )
         }
-        throw WebViewLegacyChallengeError.isolatedStoreFailed(
-            WebViewDoHChallengeSPI.lastFailureReason()
-                ?? "isolated WKWebsiteDataStore creation failed"
-        )
     }
 
     private static func transferCookies(
