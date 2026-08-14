@@ -131,6 +131,29 @@ final class WebCookieStore {
         if !newCookies.isEmpty { setCookies(newCookies) }
     }
 
+    /// URLProtocol often does not apply `Set-Cookie` to `WKHTTPCookieStore`.
+    /// Copy parsed cookies into the shared WebView jar so challenge JS sees them.
+    @MainActor
+    func persistCookiesToWebsiteDataStore(_ cookies: [HTTPCookie]) {
+        guard !cookies.isEmpty else { return }
+        let store = websiteDataStore.httpCookieStore
+        for cookie in cookies {
+            store.setCookie(cookie)
+        }
+    }
+
+    @MainActor
+    func mergeProtocolResponse(_ response: HTTPURLResponse, for url: URL) {
+        mergeResponseHeaders(response.allHeaderFields, for: url)
+        var stringHeaders: [String: String] = [:]
+        for (key, value) in response.allHeaderFields {
+            stringHeaders["\(key)"] = "\(value)"
+        }
+        persistCookiesToWebsiteDataStore(
+            HTTPCookie.cookies(withResponseHeaderFields: stringHeaders, for: url)
+        )
+    }
+
     @MainActor
     func syncFromWebView(_ dataStore: WKWebsiteDataStore, for url: URL) async {
         let cookies = await withCheckedContinuation { cont in

@@ -50,6 +50,11 @@ nonisolated enum WebViewCustomProtocolSchemes {
         return retainCount
     }
 
+    /// True while a challenge / password-login WebView holds a scheme lease.
+    static var isRetained: Bool {
+        registrationCount > 0
+    }
+
     static func acquire() -> Lease? {
         lock.lock()
         if !isRegistered {
