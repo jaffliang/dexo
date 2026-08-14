@@ -5147,13 +5147,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do / idcflare fork of Eilgnaw/dexo for iOS 15."
+            "value" : "linux.do / idcflare fork of Eilgnaw/dexo for iOS 15. Forum API can use a local DoH gateway."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "面向 linux.do / idcflare 的 Eilgnaw/dexo fork，支持 iOS 15。"
+            "value" : "面向 linux.do / idcflare 的 Eilgnaw/dexo fork，支持 iOS 15。论坛 API 可走本地 DoH 网关。"
           }
         }
       }
