@@ -2,11 +2,33 @@ import Foundation
 import Network
 import Security
 
+/// Holds the MITM CA for the CONNECT framer.
+///
+/// `NWProtocolFramer.Instance.options` / `Options` subscript are iOS 15.4+.
+/// The listener has one CA at a time, so a process-wide holder keeps the
+/// framer compiling and working on iOS 15.0–15.3.
 nonisolated final class WebViewMITMFramerContext: NSObject, @unchecked Sendable {
-    let certificateAuthority: WebViewProxyCertificateAuthority
+    static let shared = WebViewMITMFramerContext()
 
-    init(certificateAuthority: WebViewProxyCertificateAuthority) {
-        self.certificateAuthority = certificateAuthority
+    private let lock = NSLock()
+    private var storedAuthority: WebViewProxyCertificateAuthority?
+
+    var certificateAuthority: WebViewProxyCertificateAuthority? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedAuthority
+    }
+
+    func install(_ authority: WebViewProxyCertificateAuthority) {
+        lock.lock()
+        storedAuthority = authority
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        storedAuthority = nil
+        lock.unlock()
     }
 }
 
@@ -17,22 +39,19 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
     static let label = "Dexo HTTP CONNECT MITM"
     static let definition = NWProtocolFramer.Definition(implementation: HTTPConnectMITMFramer.self)
 
-    private static let contextKey = "dexo.webview.mitm.context"
     private static let headerDelimiter = Data("\r\n\r\n".utf8)
     private static let maximumHeaderSize = 64 * 1024
 
-    private let context: WebViewMITMFramerContext?
+    private let context = WebViewMITMFramerContext.shared
     private var didUpgradeToTLS = false
     private var didBecomePassThrough = false
 
     required init(framer: NWProtocolFramer.Instance) {
-        context = framer.options[Self.contextKey] as? WebViewMITMFramerContext
+        _ = framer
     }
 
-    static func options(context: WebViewMITMFramerContext) -> NWProtocolFramer.Options {
-        let options = NWProtocolFramer.Options(definition: definition)
-        options[contextKey] = context
-        return options
+    static func options() -> NWProtocolFramer.Options {
+        NWProtocolFramer.Options(definition: definition)
     }
 
     func start(framer: NWProtocolFramer.Instance) -> NWProtocolFramer.StartResult {
@@ -67,7 +86,7 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
         }
 
         guard parsed else { return 1 }
-        guard headerLength > 0, let request, let context else {
+        guard headerLength > 0, let request, let certificateAuthority = context.certificateAuthority else {
             fail(framer: framer, statusCode: 400, reason: "Bad Request")
             return 0
         }
@@ -97,7 +116,7 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
 
         let identity: WebViewProxyTLSIdentity
         do {
-            identity = try context.certificateAuthority.identity(for: request.host)
+            identity = try certificateAuthority.identity(for: request.host)
         } catch {
             #if DEBUG
             print("[WebViewDoHProxy] failed to sign certificate for \(request.host): \(error)")

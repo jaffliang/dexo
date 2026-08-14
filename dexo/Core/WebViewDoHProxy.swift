@@ -269,9 +269,9 @@ final class WebViewDoHProxy {
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.allowLocalEndpointReuse = true
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
-        let context = WebViewMITMFramerContext(certificateAuthority: certificateAuthority)
+        WebViewMITMFramerContext.shared.install(certificateAuthority)
         parameters.defaultProtocolStack.applicationProtocols.insert(
-            HTTPConnectMITMFramer.options(context: context),
+            HTTPConnectMITMFramer.options(),
             at: 0
         )
 
@@ -374,6 +374,7 @@ final class WebViewDoHProxy {
         listener = nil
         listenerPort = nil
         certificateAuthority = nil
+        WebViewMITMFramerContext.shared.clear()
     }
 
     private func stopListener(error: Error?) {
@@ -381,6 +382,7 @@ final class WebViewDoHProxy {
         listener = nil
         listenerPort = nil
         certificateAuthority = nil
+        WebViewMITMFramerContext.shared.clear()
         activeListener?.stateUpdateHandler = nil
         activeListener?.newConnectionHandler = nil
         activeListener?.cancel()
