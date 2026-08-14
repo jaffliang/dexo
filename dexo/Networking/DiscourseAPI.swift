@@ -913,6 +913,10 @@ final class DiscourseAPI {
         var headers = HTTPHeaders()
         headers.add(name: "X-SILENCE-LOGGER", value: "true")
         headers.add(name: "Discourse-Background", value: "true")
+        // Discourse rejects state-changing requests without `X-Requested-With:
+        // XMLHttpRequest` (CSRF/origin guard) → 403. fluxidc's Dio client
+        // sends this on every request; other DiscourseAPI POSTs already do.
+        headers.add(name: "X-Requested-With", value: "XMLHttpRequest")
         debugLog("[DiscourseAPI] POST /topics/timings topic=\(topicId) topic_time=\(topicTime) posts=\(timings.count)")
         let attemptedAt = Date()
         let requestStart = Date()
