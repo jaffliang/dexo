@@ -1,4 +1,5 @@
 import DoHGatewayPolicy
+import WebKit
 import XCTest
 @testable import dexo
 
@@ -31,6 +32,15 @@ final class EncryptedDNSManagerTests: XCTestCase {
         let startedAt = Date()
         EncryptedDNSManager.shared.applyCurrentSettings()
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+    }
+
+    func testClearLeftoverWebKitHTTPProxiesTargetsDefaultAndCookieStores() {
+        let defaultStore = WKWebsiteDataStore.default()
+        let cookieStore = WebCookieStore.shared.websiteDataStore
+        XCTAssertTrue(cookieStore !== defaultStore)
+        EncryptedDNSManager.shared.clearLeftoverWebKitHTTPProxies()
+        WKWebsiteDataStore.dexo_clearProxyConfiguration(defaultStore)
+        WKWebsiteDataStore.dexo_clearProxyConfiguration(cookieStore)
     }
 
     func testApplyAsyncInvalidURLCompletesWithoutHanging() {
