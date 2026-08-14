@@ -1,10 +1,12 @@
 What to Test
 
-Dexo 2.1 (iOS 15+)
+Dexo 2.2 (iOS 15+)
 
 - Settings → Network → DoH: enable a built-in resolver or a custom HTTPS DoH URL (including endpoints like `https://jeff-dean.ddd.oaifree.com/query-dns`). Confirm forum API, topic lists, and password login still work. On iOS 15, in-app WKWebView pages are not proxied.
 - Switching DoH resolvers must stay responsive (probe is off the main thread, ~4s cap). If a resolver fails, the app should revert or disable DoH and must not black-screen on the next launch.
 - In DoH settings, confirm ECH compiled: yes. When the origin publishes an HTTPS RR, ECH is used. HTTP/2 when Cloudflare selects `h2`; brotli decode on the API path.
+- Read-time: Settings has separate switches for linux.do (off by default) and idcflare (on by default). Guests must not POST `/topics/timings` and must not show the small blue unread-timing dot next to post numbers.
+- When logged in and that site’s switch is on, a small blue dot appears next to unread post numbers; it should clear after that floor is timed. After 3 consecutive report failures, only that site’s switch turns off (risk-control). The other site’s switch must stay unchanged. You can turn it back on in Settings; check report history for status.
 - linux.do / idcflare.com: sign in with username and password. Complete hCaptcha if shown. If the account has TOTP 2FA, confirm a 6-digit prompt appears (including when Discourse returns `invalid_second_factor_method`) and that a valid code signs you in.
 - As a guest on linux.do / idcflare, complete the Cloudflare challenge and confirm browsing works after clearance. Sign in afterward and confirm the same clearance is reused.
 - While logged in, tap an HTTPS link in a post and use Me / Settings → Open Web. Confirm the in-app browser is already signed in (e.g. cdk.linux.do, connect.linux.do OAuth). Opening linux.do/login should not hang on the iOS 15 SPA.

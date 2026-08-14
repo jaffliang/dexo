@@ -5131,13 +5131,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Based on Eilgnaw/dexo. Tap to open this fork on GitHub."
+            "value" : "Based on Eilgnaw/dexo. Tap to open this fork on GitHub. Official builds are on GitHub Releases."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "基于 Eilgnaw/dexo。点按打开本 fork 的 GitHub 仓库。"
+            "value" : "基于 Eilgnaw/dexo。点按打开本 fork 的 GitHub 仓库。正式版见 GitHub Releases。"
           }
         }
       }
@@ -5147,13 +5147,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do / idcflare fork of Eilgnaw/dexo for iOS 15. Forum API can use a local DoH gateway."
+            "value" : "linux.do / idcflare fork of Eilgnaw/dexo for iOS 15. Adds password login, authenticated in-app browser, Cookie export, a DoH/ECH gateway for the forum API, and read-time reporting (per-site switches; auto-off after 3 consecutive failures)."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "面向 linux.do / idcflare 的 Eilgnaw/dexo fork，支持 iOS 15。论坛 API 可走本地 DoH 网关。"
+            "value" : "面向 linux.do / idcflare 的 Eilgnaw/dexo fork，支持 iOS 15。相对上游增加账密登录、应用内带登录态浏览器、Cookie 导出、论坛 API 的 DoH/ECH 网关，以及阅读时间上报（linux.do 与 idcflare 独立开关，连续失败 3 次自动关闭）。"
           }
         }
       }
