@@ -93,22 +93,37 @@ pub fn status_and_decoded_body(message: &[u8]) -> Result<(u16, Vec<u8>), String>
 
 /// Unchunk, gunzip/inflate if needed, and refuse Cloudflare HTML so the iOS
 /// client never JSON-decodes an interstitial or compressed bytes.
-pub fn process_upstream_response(message: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoded = decode_response(message)?;
-    let encoding = header_value(&decoded.headers, "content-encoding")
+pub fn process_upstream_response(message: &[u8], alpn: &str) -> Result<Vec<u8>, String> {
+    let decoded = decode_response(message)?;
+    process_upstream_parts(decoded.status, &decoded.headers, decoded.body, alpn)
+}
+
+pub fn process_upstream_parts(
+    status: u16,
+    headers: &[(String, String)],
+    mut body: Vec<u8>,
+    alpn: &str,
+) -> Result<Vec<u8>, String> {
+    let encoding = header_value(headers, "content-encoding")
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"));
     if let Some(encoding) = encoding {
-        decoded.body = decode_content_encoding(encoding, decoded.body)?;
-        if let Some(reason) = html_challenge_reason(&decoded.headers, &decoded.body) {
-            return Err(reason.into());
-        }
-        return Ok(encode_identity_response(&decoded));
+        body = decode_content_encoding(encoding, body)?;
     }
-    if let Some(reason) = html_challenge_reason(&decoded.headers, &decoded.body) {
-        return Err(reason.into());
+    if let Some(reason) = html_challenge_reason(headers, &body, status, alpn) {
+        return Err(reason);
     }
-    Ok(message.to_vec())
+    let reason = if (200..300).contains(&status) {
+        "OK"
+    } else {
+        "Error"
+    };
+    Ok(encode_identity_response(&DecodedResponse {
+        status,
+        reason: reason.to_string(),
+        headers: headers.to_vec(),
+        body,
+    }))
 }
 
 struct DecodedResponse {
@@ -205,24 +220,63 @@ fn inflate(body: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn html_challenge_reason(headers: &[(String, String)], body: &[u8]) -> Option<&'static str> {
+fn html_challenge_reason(
+    headers: &[(String, String)],
+    body: &[u8],
+    status: u16,
+    alpn: &str,
+) -> Option<String> {
+    if !is_cloudflare_html(headers, body) {
+        return None;
+    }
+    let title = html_title_or_snippet(body);
+    Some(format!(
+        "Cloudflare HTML {status} alpn={alpn} title={title}"
+    ))
+}
+
+fn is_cloudflare_html(headers: &[(String, String)], body: &[u8]) -> bool {
     if header_value(headers, "cf-mitigated").is_some() {
-        return Some("Cloudflare HTML");
+        return true;
     }
     if header_value(headers, "content-type")
         .map(|value| value.to_ascii_lowercase().contains("html"))
         .unwrap_or(false)
     {
-        return Some("Cloudflare HTML");
+        return true;
     }
     let start = body
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
         .unwrap_or(body.len());
-    if body.get(start) == Some(&b'<') {
-        return Some("Cloudflare HTML");
-    }
-    None
+    body.get(start) == Some(&b'<')
+}
+
+fn html_title_or_snippet(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let lower = text.to_ascii_lowercase();
+    let raw = if let Some(start) = lower.find("<title>") {
+        let rest = &text[start + 7..];
+        let rest_lower = rest.to_ascii_lowercase();
+        let end = rest_lower.find("</title>").unwrap_or(rest.len());
+        rest[..end].to_string()
+    } else {
+        let start = body
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(0);
+        String::from_utf8_lossy(&body[start..]).into_owned()
+    };
+    one_line_prefix(&raw, 40)
+}
+
+fn one_line_prefix(value: &str, max_chars: usize) -> String {
+    let flat: String = value
+        .chars()
+        .map(|ch| if ch == '\n' || ch == '\r' || ch == '\t' { ' ' } else { ch })
+        .collect();
+    let collapsed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(max_chars).collect()
 }
 
 fn encode_identity_response(decoded: &DecodedResponse) -> Vec<u8> {
@@ -428,15 +482,33 @@ mod tests {
     #[test]
     fn html_body_is_not_forwarded() {
         let response = b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: 19\r\n\r\n<!DOCTYPE html>nope";
-        let error = process_upstream_response(response).unwrap_err();
-        assert_eq!(error, "Cloudflare HTML");
+        let error = process_upstream_response(response, "http/1.1").unwrap_err();
+        assert_eq!(
+            error,
+            "Cloudflare HTML 403 alpn=http/1.1 title=<!DOCTYPE html>nope"
+        );
+        assert!(!error.contains('\n'));
+    }
+
+    #[test]
+    fn html_error_includes_status_alpn_and_title() {
+        let body = b"<html><title>Just a moment...</title><body>ok</body></html>";
+        let mut response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let error = process_upstream_response(&response, "h2").unwrap_err();
+        assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title=Just a moment...");
+        assert!(!error.contains('\n'));
     }
 
     #[test]
     fn cf_mitigated_header_is_not_forwarded() {
         let response = b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 2\r\n\r\n{}";
-        let error = process_upstream_response(response).unwrap_err();
-        assert_eq!(error, "Cloudflare HTML");
+        let error = process_upstream_response(response, "h2").unwrap_err();
+        assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title={}");
     }
 
     #[test]
@@ -452,7 +524,7 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(&compressed);
-        let rewritten = process_upstream_response(&response).unwrap();
+        let rewritten = process_upstream_response(&response, "http/1.1").unwrap();
         let text = String::from_utf8(rewritten).unwrap();
         assert!(text.contains("Content-Length: 17"));
         assert!(!text.to_ascii_lowercase().contains("content-encoding"));

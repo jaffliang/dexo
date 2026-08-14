@@ -4,7 +4,8 @@
 //!
 //! Cipher suites and key-exchange groups are ordered like Chrome/Safari so
 //! Cloudflare is less likely to serve a "Just a moment" HTML interstitial.
-//! ALPN stays `http/1.1` only.
+//! ALPN offers `h2` then `http/1.1`; the gateway speaks HTTP/2 when
+//! the handshake selects `h2`.
 
 use std::sync::Arc;
 
@@ -25,7 +26,7 @@ impl GatewayTls {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut plain = client_config(roots, None).expect("plain TLS config");
-        plain.alpn_protocols = vec![b"http/1.1".to_vec()];
+        apply_origin_alpn(&mut plain);
         Self {
             plain: Arc::new(plain),
         }
@@ -90,6 +91,23 @@ impl GatewayTls {
     }
 }
 
+pub fn origin_alpn_protocols() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+}
+
+fn apply_origin_alpn(config: &mut ClientConfig) {
+    config.alpn_protocols = origin_alpn_protocols();
+}
+
+/// `h2`, `http/1.1`, or `http/1.1` when the peer selected nothing.
+pub fn negotiated_alpn(tls: &TlsStream<TcpStream>) -> &'static str {
+    match tls.get_ref().1.alpn_protocol() {
+        Some(b"h2") => "h2",
+        Some(b"http/1.1") => "http/1.1",
+        Some(_) | None => "http/1.1",
+    }
+}
+
 fn install_provider() {
     let _ = browser_like_provider().install_default();
 }
@@ -130,7 +148,7 @@ fn ech_client_config(config_list: &[u8]) -> Result<Arc<ClientConfig>, String> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = client_config(roots, Some(EchMode::Enable(ech)))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    apply_origin_alpn(&mut config);
     Ok(Arc::new(config))
 }
 
@@ -199,6 +217,32 @@ fn chrome_like_kx_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpn_offers_h2_then_http11() {
+        assert_eq!(
+            origin_alpn_protocols(),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+        let tls = GatewayTls::new();
+        assert_eq!(tls.plain_config().alpn_protocols, origin_alpn_protocols());
+    }
+
+    #[cfg(feature = "ech")]
+    #[test]
+    fn ech_client_config_offers_h2_then_http11() {
+        let message = hex(
+            "111181800001000100000000056c696e757802646f0000410001c00c004100010000012c0088\
+             0001000001000602683302683200040008681410eaac42a63d000500470045fe0d0041b50020\
+             0020121ae8bca202378d31efc2e5db4cce83f4a8ed582ec5e043b69e362c42e7ab0f00040001\
+             00010012636c6f7564666c6172652d6563682e636f6d00000006002026064700001000000000\
+             0000681410ea260647000010000000000000ac42a63d",
+        );
+        let lookup = crate::dns::decode_lookup(&message, 0x1111).unwrap();
+        let ech = lookup.https[0].ech_config.as_ref().expect("ECH present");
+        let config = ech_client_config(ech).expect("ECH config");
+        assert_eq!(config.alpn_protocols, origin_alpn_protocols());
+    }
 
     #[test]
     fn browser_like_ciphers_put_aes128_gcm_first() {

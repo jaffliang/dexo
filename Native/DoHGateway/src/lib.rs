@@ -3,6 +3,7 @@ mod doh;
 mod ffi;
 mod gateway;
 mod http;
+mod http2;
 mod tls;
 
 pub use ffi::{

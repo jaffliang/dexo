@@ -149,7 +149,7 @@ impl DohResolver {
         let connector = TlsConnector::from(self.tls.plain_config());
         let server_name = ServerName::try_from(self.endpoint.host.clone())
             .map_err(|_| "invalid DoH hostname")?;
-        let mut tls = tokio::time::timeout(DOH_TIMEOUT, connector.connect(server_name, tcp))
+        let tls = tokio::time::timeout(DOH_TIMEOUT, connector.connect(server_name, tcp))
             .await
             .map_err(|_| "DoH TLS timeout".to_string())?
             .map_err(|error| format!("DoH TLS: {error}"))?;
@@ -159,9 +159,62 @@ impl DohResolver {
         } else {
             self.endpoint.path.clone()
         };
+        let alpn = crate::tls::negotiated_alpn(&tls);
+        if alpn == "h2" {
+            return self.exchange_h2(tls, &path, wire, post).await;
+        }
+        self.exchange_http11(tls, &path, wire, post).await
+    }
+
+    async fn exchange_h2(
+        &self,
+        tls: tokio_rustls::client::TlsStream<TcpStream>,
+        path: &str,
+        wire: &[u8],
+        post: bool,
+    ) -> Result<Vec<u8>, String> {
+        let (method, path, headers, body): (&str, String, Vec<(String, String)>, &[u8]) = if post {
+            (
+                "POST",
+                path.to_string(),
+                vec![
+                    ("accept".into(), "application/dns-message".into()),
+                    ("content-type".into(), "application/dns-message".into()),
+                ],
+                wire,
+            )
+        } else {
+            let dns = base64url_nopad(wire);
+            let separator = if path.contains('?') { '&' } else { '?' };
+            (
+                "GET",
+                format!("{path}{separator}dns={dns}"),
+                vec![("accept".into(), "application/dns-message".into())],
+                &[],
+            )
+        };
+        let (status, _, body) = tokio::time::timeout(
+            DOH_TIMEOUT,
+            crate::http2::exchange(tls, method, &self.endpoint.host, &path, &headers, body),
+        )
+        .await
+        .map_err(|_| "DoH read timeout".to_string())??;
+        if status != 200 {
+            return Err(format!("DoH HTTP {status}"));
+        }
+        Ok(body)
+    }
+
+    async fn exchange_http11(
+        &self,
+        mut tls: tokio_rustls::client::TlsStream<TcpStream>,
+        path: &str,
+        wire: &[u8],
+        post: bool,
+    ) -> Result<Vec<u8>, String> {
         let request = if post {
             format!(
-                "POST {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+                "POST {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {len}\r\n\r\n",
                 host = self.endpoint.host,
                 len = wire.len(),
             )
@@ -169,7 +222,7 @@ impl DohResolver {
             let dns = base64url_nopad(wire);
             let separator = if path.contains('?') { '&' } else { '?' };
             format!(
-                "GET {path}{separator}dns={dns} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n",
+                "GET {path}{separator}dns={dns} HTTP/1.1\r\nHost: {host}\r\nAccept: application/dns-message\r\n\r\n",
                 host = self.endpoint.host,
             )
         };

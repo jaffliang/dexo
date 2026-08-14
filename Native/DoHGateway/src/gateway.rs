@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+use tokio_rustls::client::TlsStream;
 
 use crate::doh::DohResolver;
 use crate::http::{self, MAX_BODY_BYTES, MAX_HEADER_BYTES};
@@ -354,14 +355,51 @@ fn is_no_route_text(error: &str) -> bool {
         || lower.contains("os error 51")
 }
 
-async fn proxy_http<S>(
-    mut tls: S,
+async fn proxy_http(
+    tls: TlsStream<TcpStream>,
     request: &ParsedRequest,
     upstream: &Upstream,
-) -> Result<Vec<u8>, String>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
+) -> Result<Vec<u8>, String> {
+    let alpn = crate::tls::negotiated_alpn(&tls);
+    eprintln!("[DoHGateway] ALPN {alpn} for {}", upstream.host);
+    if alpn == "h2" {
+        proxy_http2(tls, request, upstream, alpn).await
+    } else {
+        proxy_http11(tls, request, upstream, alpn).await
+    }
+}
+
+async fn proxy_http2(
+    tls: TlsStream<TcpStream>,
+    request: &ParsedRequest,
+    upstream: &Upstream,
+    alpn: &str,
+) -> Result<Vec<u8>, String> {
+    let path = origin_form(&request.target);
+    let authority = host_header(upstream);
+    let headers = forwarded_request_headers(request);
+    let (status, headers, body) = tokio::time::timeout(
+        UPSTREAM_TIMEOUT,
+        crate::http2::exchange(
+            tls,
+            &request.method,
+            &authority,
+            &path,
+            &headers,
+            &request.body,
+        ),
+    )
+    .await
+    .map_err(|_| "upstream read timeout".to_string())??;
+    http::process_upstream_parts(status, &headers, body, alpn)
+}
+
+async fn proxy_http11(
+    mut tls: TlsStream<TcpStream>,
+    request: &ParsedRequest,
+    upstream: &Upstream,
+    alpn: &str,
+) -> Result<Vec<u8>, String> {
     let payload = encode_upstream_request(request, upstream);
     tls.write_all(&payload)
         .await
@@ -376,7 +414,7 @@ where
     if response.is_empty() {
         return Err("empty upstream response".into());
     }
-    http::process_upstream_response(&response)
+    http::process_upstream_response(&response, alpn)
 }
 
 #[derive(Debug)]
@@ -460,23 +498,47 @@ fn is_loopback_host(host: &str) -> bool {
 fn encode_upstream_request(request: &ParsedRequest, upstream: &Upstream) -> Vec<u8> {
     let target = origin_form(&request.target);
     let mut out = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", request.method, target, host_header(upstream)).into_bytes();
-    for (name, value) in &request.headers {
-        if is_hop_by_hop(name)
-            || name.eq_ignore_ascii_case("host")
-            || name.eq_ignore_ascii_case("accept-encoding")
-            || name.eq_ignore_ascii_case(SKIP_HEADER)
-            || name.to_ascii_lowercase().starts_with("x-dexo-gateway-")
-        {
-            continue;
-        }
+    for (name, value) in forwarded_request_headers(request) {
         out.extend_from_slice(name.as_bytes());
         out.extend_from_slice(b": ");
         out.extend_from_slice(value.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
-    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    // HTTP/1.1 defaults to keep-alive. We already stop on Content-Length or
+    // the last chunk; Connection: close is only needed for bodies with neither,
+    // which we do not advertise here.
+    out.extend_from_slice(b"\r\n");
     out.extend_from_slice(&request.body);
     out
+}
+
+fn forwarded_request_headers(request: &ParsedRequest) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let mut has_accept_encoding = false;
+    let mut has_content_length = false;
+    for (name, value) in &request.headers {
+        if is_hop_by_hop(name)
+            || name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case(SKIP_HEADER)
+            || name.to_ascii_lowercase().starts_with("x-dexo-gateway-")
+        {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("accept-encoding") {
+            has_accept_encoding = true;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            has_content_length = true;
+        }
+        headers.push((name.clone(), value.clone()));
+    }
+    if !has_accept_encoding {
+        headers.push(("Accept-Encoding".into(), "gzip, deflate".into()));
+    }
+    if !request.body.is_empty() && !has_content_length {
+        headers.push(("Content-Length".into(), request.body.len().to_string()));
+    }
+    headers
 }
 
 fn host_header(upstream: &Upstream) -> String {
@@ -787,11 +849,12 @@ mod tests {
         assert!(encoded.starts_with("GET /latest.json HTTP/1.1\r\nHost: idcflare.com\r\n"));
         assert!(encoded.contains("Accept: application/json"));
         assert!(!encoded.to_ascii_lowercase().contains(HOST_HEADER));
-        assert!(encoded.contains("Connection: close"));
+        assert!(!encoded.to_ascii_lowercase().contains("connection: close"));
+        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
     }
 
     #[test]
-    fn strips_accept_encoding_from_upstream_request() {
+    fn forwards_or_injects_accept_encoding() {
         let parsed = request(vec![
             ("Host", "127.0.0.1:1"),
             (HOST_HEADER, "linux.do"),
@@ -804,7 +867,33 @@ mod tests {
         };
         let encoded = String::from_utf8(encode_upstream_request(&parsed, &upstream)).unwrap();
         assert!(encoded.contains("Accept: application/json"));
-        assert!(!encoded.to_ascii_lowercase().contains("accept-encoding"));
+        assert!(encoded.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
+        assert!(!encoded.to_ascii_lowercase().contains("br"));
+        assert!(!encoded.to_ascii_lowercase().contains("zstd"));
+
+        let injected = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Accept", "application/json"),
+        ]);
+        let injected = String::from_utf8(encode_upstream_request(&injected, &upstream)).unwrap();
+        assert!(injected.to_ascii_lowercase().contains("accept-encoding: gzip, deflate"));
+    }
+
+    #[test]
+    fn forwarded_headers_omit_connection_and_keep_accept_encoding() {
+        let parsed = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Connection", "close"),
+            ("Accept", "application/json"),
+        ]);
+        let headers = forwarded_request_headers(&parsed);
+        assert!(!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("connection")));
+        assert!(!headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("host")));
+        assert!(headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("accept-encoding") && value == "gzip, deflate"
+        }));
     }
 
     #[test]

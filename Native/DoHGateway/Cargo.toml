@@ -23,6 +23,9 @@ tokio = { version = "1.43", default-features = false, features = ["rt-multi-thre
 tokio-rustls = { version = "0.26.1", default-features = false, features = ["tls12"] }
 webpki-roots = "0.26.8"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+bytes = "1"
+http = "1"
+h2 = { version = "0.4", default-features = false, features = ["stream"] }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util"] }
