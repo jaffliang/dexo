@@ -11,97 +11,6 @@ private nonisolated enum TopicDetailItem: Hashable, Sendable {
     case loadMoreChildren(Int)
 }
 
-// MARK: - Topic Read Tracker
-
-/// Tracks how long each post was visible on screen so we can POST `/topics/timings`
-/// and have Discourse mark the posts as read (which is what `/read.json` reflects).
-/// `nonisolated` to dodge the iOS 26 back-deploy `swift_task_deinitOnExecutorMainActorBackDeploy`
-/// crash for MainActor helper deinits.
-nonisolated final class TopicReadTracker {
-    private var visibleStarts: [Int: CFTimeInterval] = [:]
-    private var elapsedByPost: [Int: Int] = [:]
-    private var totalSentByPost: [Int: Int] = [:]
-    private var sessionStart: CFTimeInterval?
-    private var sessionAccumulated: Int = 0
-
-    /// Begin / resume the topic-level timer. Idempotent.
-    func startSession() {
-        guard sessionStart == nil else { return }
-        sessionStart = CACurrentMediaTime()
-    }
-
-    func recordVisible(postNumber: Int) {
-        guard visibleStarts[postNumber] == nil else { return }
-        visibleStarts[postNumber] = CACurrentMediaTime()
-    }
-
-    func recordHidden(postNumber: Int) {
-        guard let start = visibleStarts.removeValue(forKey: postNumber) else { return }
-        addElapsed(postNumber: postNumber, elapsed: msSince(start))
-    }
-
-    /// Roll up in-flight timers and stop counting until the next `startSession`.
-    /// Used when the VC is covered (push) or app backgrounded — the user isn't
-    /// actually reading anymore so per-post and topic timers must freeze.
-    func pause() {
-        let now = CACurrentMediaTime()
-        for (postNumber, start) in visibleStarts {
-            addElapsed(postNumber: postNumber, elapsed: Int((now - start) * 1000))
-        }
-        visibleStarts = [:]
-        if let start = sessionStart {
-            sessionAccumulated += Int((now - start) * 1000)
-            sessionStart = nil
-        }
-    }
-
-    /// Snapshot the unsent delta and reset delta state. Visible cells and the
-    /// session timer keep ticking — their start times are reset to `now` so
-    /// the next snapshot picks up cleanly without double-counting (the server
-    /// treats `/topics/timings` POSTs as additive).
-    func snapshotDelta() -> (topicTime: Int, timings: [Int: Int]) {
-        let now = CACurrentMediaTime()
-        for (postNumber, start) in visibleStarts {
-            addElapsed(postNumber: postNumber, elapsed: Int((now - start) * 1000))
-            visibleStarts[postNumber] = now
-        }
-        if let start = sessionStart {
-            sessionAccumulated += Int((now - start) * 1000)
-            sessionStart = now
-        }
-        let snapTopic = sessionAccumulated
-        let snapTimings = elapsedByPost
-        for (postNumber, ms) in snapTimings {
-            totalSentByPost[postNumber, default: 0] += ms
-        }
-        sessionAccumulated = 0
-        elapsedByPost = [:]
-        return (snapTopic, snapTimings)
-    }
-
-    /// - Skips flash-by visits (< 500 ms).
-    /// - Caps cumulative *sent + pending* at MAX_TRACKING_TIME (6 min) to match
-    ///   Discourse's per-session ceiling, so a post sitting on-screen for hours
-    ///   doesn't skew server-side `avg_time` scoring.
-    private func addElapsed(postNumber: Int, elapsed: Int) {
-        guard elapsed >= Self.minVisibleMs else { return }
-        let pending = elapsedByPost[postNumber, default: 0]
-        let alreadySent = totalSentByPost[postNumber, default: 0]
-        let remaining = max(0, Self.maxPerPostMs - pending - alreadySent)
-        let toAdd = min(elapsed, remaining)
-        if toAdd > 0 {
-            elapsedByPost[postNumber] = pending + toAdd
-        }
-    }
-
-    private func msSince(_ start: CFTimeInterval) -> Int {
-        Int((CACurrentMediaTime() - start) * 1000)
-    }
-
-    private static let maxPerPostMs = 6 * 60 * 1000
-    private static let minVisibleMs = 1000
-}
-
 // MARK: - Frame Drop Detector (temporary perf debugging)
 final class FrameDropDetector {
 #if DEBUG
@@ -253,9 +162,13 @@ final class LegacyTopicDetailViewController: ObservableViewController {
     private lazy var boostDanmaku = BoostDanmakuOverlay(hostView: view)
     private let readTracker = TopicReadTracker()
     private var readFlushTimer: Timer?
+    private var readTickTimer: Timer?
     private var pendingReadFlush: DispatchWorkItem?
+    private var isFlushingReadTimings = false
+    private var hasPendingReadFlush = false
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
+    private static let readTickInterval: TimeInterval = 1
     private let hidesLikeButton: Bool
 
     private lazy var tableView: UITableView = {
@@ -670,9 +583,7 @@ final class LegacyTopicDetailViewController: ObservableViewController {
         super.viewWillAppear(animated)
         resumeReadTracking()
         startReadFlushTimer()
-        // Initial "rush" flush: same code path as scroll-stop — debounced by
-        // `readFlushDebounce` (1.5s) so visible cells cross the 1s min threshold
-        // and get included in the snapshot.
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
@@ -761,6 +672,7 @@ final class LegacyTopicDetailViewController: ObservableViewController {
         super.viewWillDisappear(animated)
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         // Pause stops the topic timer (and clears in-flight visible-cell timers)
         // until the next viewWillAppear, so any time the VC is off-screen — push,
@@ -771,6 +683,7 @@ final class LegacyTopicDetailViewController: ObservableViewController {
     @objc private func appDidEnterBackground() {
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         readTracker.pause()
     }
@@ -778,6 +691,7 @@ final class LegacyTopicDetailViewController: ObservableViewController {
     @objc private func appWillEnterForeground() {
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
@@ -803,11 +717,17 @@ final class LegacyTopicDetailViewController: ObservableViewController {
     /// on screen — those cells won't receive a new `willDisplay` callback after a
     /// pause (push→pop, foreground from background), so we'd miss their time.
     private func resumeReadTracking() {
+        readTracker.unfreeze()
         readTracker.startSession()
+        syncVisibleReadTracking()
+    }
+
+    private func syncVisibleReadTracking() {
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   case .post(let postId) = item,
                   let post = viewModel.postsById[postId] else { continue }
+            if post.read { readTracker.markServerRead(post.postNumber) }
             readTracker.recordVisible(postNumber: post.postNumber)
         }
     }
@@ -828,19 +748,83 @@ final class LegacyTopicDetailViewController: ObservableViewController {
         readFlushTimer = nil
     }
 
+    private func startReadTickTimer() {
+        stopReadTickTimer()
+        let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.syncVisibleReadTracking()
+            if self.readTracker.shouldRushFlush() || self.readTracker.shouldPeriodicFlush() {
+                self.flushReadTimings()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readTickTimer = timer
+    }
+
+    private func stopReadTickTimer() {
+        readTickTimer?.invalidate()
+        readTickTimer = nil
+    }
+
     private func flushReadTimings() {
+        guard ForumPolicy.tracksReadTimings(baseURL: api.baseURL),
+              AuthManager.shared.isAuthenticated(for: api.baseURL)
+        else { return }
+        if isFlushingReadTimings {
+            hasPendingReadFlush = true
+            return
+        }
         let snap = readTracker.snapshotDelta()
         debugLog("[ReadTracker] topic=\(topicId) flush topic_time=\(snap.topicTime) posts=\(snap.timings.count)")
         guard !snap.timings.isEmpty else { return }
+        isFlushingReadTimings = true
         let topicId = self.topicId
         let api = self.api
-        Task.detached {
-            try? await api.postTopicTimings(
-                topicId: topicId,
-                topicTime: snap.topicTime,
-                timings: snap.timings
-            )
+        Task { [weak self] in
+            do {
+                try await api.postTopicTimings(
+                    topicId: topicId,
+                    topicTime: snap.topicTime,
+                    timings: snap.timings
+                )
+                await MainActor.run {
+                    self?.readTracker.commitSend()
+                    self?.finishReadFlush()
+                }
+            } catch is TopicTimingBackoffError {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isCloudflareChallenge {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch let error as TopicTimingRequestError where error.isRetryable {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.finishReadFlush()
+                }
+            } catch let error as DiscourseAPIError where error.isChallengeRequired {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.finishReadFlush()
+                }
+            } catch {
+                await MainActor.run {
+                    self?.readTracker.dropInFlight()
+                    self?.finishReadFlush()
+                }
+            }
         }
+    }
+
+    private func finishReadFlush() {
+        isFlushingReadTimings = false
+        guard hasPendingReadFlush else { return }
+        hasPendingReadFlush = false
+        flushReadTimings()
     }
 
     override func viewDidLayoutSubviews() {
@@ -2240,6 +2224,7 @@ extension LegacyTopicDetailViewController: UITableViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        readTracker.markScrolled()
         let scrollStart = CACurrentMediaTime()
         defer {
             let ms = (CACurrentMediaTime() - scrollStart) * 1000
@@ -2324,6 +2309,7 @@ extension LegacyTopicDetailViewController: UITableViewDelegate {
         if let item = dataSource.itemIdentifier(for: indexPath) {
             cellHeightCache[item] = cell.bounds.height
             if case .post(let postId) = item, let post = viewModel.postsById[postId] {
+                if post.read { readTracker.markServerRead(post.postNumber) }
                 readTracker.recordVisible(postNumber: post.postNumber)
             }
         }

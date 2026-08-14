@@ -99,6 +99,56 @@ final class ReadHistoryDatabaseTests: XCTestCase {
         }
     }
 
+    func testTimingReportPersistsWithoutPreferredForumIdKeyedByBaseURL() throws {
+        try withDatabase { database in
+            let forumId = TopicTimingReportPersistence.resolvedForumId(
+                preferred: nil,
+                baseURL: "https://idcflare.com",
+                forums: []
+            )
+            XCTAssertEqual(forumId, TopicTimingReportPersistence.unresolvedForumId)
+
+            var report = TopicTimingReport(
+                id: nil,
+                forumId: forumId,
+                baseURL: "https://idcflare.com",
+                accountName: "jeff",
+                topicId: 99,
+                attemptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                topicTime: 1_000,
+                postCount: 1,
+                visibleTime: 900,
+                requestDuration: 20,
+                statusCode: 403,
+                outcome: .failure,
+                consecutiveFailureCount: 1,
+                trippedBreaker: false,
+                errorSummary: "HTTP 403"
+            )
+            try database.saveTopicTimingReport(&report)
+
+            let rows = try database.fetchTopicTimingReports()
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows[0].baseURL, "https://idcflare.com")
+            XCTAssertEqual(rows[0].forumId, TopicTimingReportPersistence.unresolvedForumId)
+            XCTAssertEqual(rows[0].statusCode, 403)
+            XCTAssertEqual(rows[0].outcome, .failure)
+        }
+    }
+
+    func testTimingReportResolvesForumIdFromTrimmedBaseURL() throws {
+        try withDatabase { database in
+            var forum = ForumInstance.new(title: "IDC", baseURL: "https://idcflare.com/")
+            try database.saveForum(&forum)
+            let resolved = TopicTimingReportPersistence.resolvedForumId(
+                preferred: nil,
+                baseURL: "https://idcflare.com",
+                forums: [forum]
+            )
+            XCTAssertEqual(resolved, forum.id)
+        }
+    }
+
     private func withDatabase(_ body: (DatabaseManager) throws -> Void) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("dexo-read-history-tests-\(UUID().uuidString)", isDirectory: true)
@@ -256,25 +306,120 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertEqual(settings.linuxDoReadTimingsActivationGeneration, 2)
     }
 
-    func testLinuxDoPolicyCoversSubdomainsWithoutChangingOtherForums() {
-        let settings = AppSettings.shared
-        let original = settings.linuxDoReadTimingsEnabled
-        defer { settings.linuxDoReadTimingsEnabled = original }
+    func testIdcflareDefaultsOnAndManualReenableAdvancesGeneration() throws {
+        let suiteName = "dexo-idcflare-timing-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(testingDefaults: defaults)
 
-        settings.linuxDoReadTimingsEnabled = false
-        XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
-        XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://meta.linux.do"))
-        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://example.com"))
-        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
-        settings.linuxDoReadTimingsEnabled = true
-        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
-        XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+        XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, 0)
+        settings.idcflareReadTimingsEnabled = false
+        XCTAssertFalse(settings.idcflareReadTimingsEnabled)
+        XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, 0)
+        settings.idcflareReadTimingsEnabled = true
+        XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, 1)
+        settings.idcflareReadTimingsEnabled = true
+        XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, 1)
+        settings.idcflareReadTimingsEnabled = false
+        settings.idcflareReadTimingsEnabled = true
+        XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, 2)
+    }
+
+    func testLinuxDoTracksOnlyWhenItsSwitchIsOn() {
+        withIsolatedReadTimingSwitches(linuxDo: false, idcflare: true) { _ in
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://meta.linux.do"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://example.com"))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+        }
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { _ in
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://meta.linux.do"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+        }
+    }
+
+    func testIdcflareTracksOnlyWhenItsSwitchIsOn() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: false) { _ in
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://www.idcflare.com"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://example.com"))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+        }
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { _ in
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://www.idcflare.com"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com", isAuthenticated: true))
+        }
+    }
+
+    func testLinuxDoPolicyCoversSubdomainsWithoutChangingOtherForums() {
+        withIsolatedReadTimingSwitches(linuxDo: false, idcflare: true) { _ in
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://meta.linux.do"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://example.com"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+        }
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { _ in
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com", isAuthenticated: true))
+        }
+        withIsolatedReadTimingSwitches(linuxDo: false, idcflare: true) { _ in
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://www.idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com", isAuthenticated: true))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: false))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: false))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://example.com", isAuthenticated: false))
+        }
+    }
+
+    func testGuestHasNoUnreadDotChromeAndNoNotLoggedInCopy() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: false))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: false))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+            XCTAssertFalse(
+                String(localized: "read_timings.banner.succeeded")
+                    .contains("未登录，无法上报阅读时间")
+            )
+        }
+    }
+
+    func testGuestPathDoesNotAutoDisableEitherSwitch() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            // Guests never POST, so they never reach recordReportingOutcome.
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: false))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: false))
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+        }
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://linux.do/"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "linux.do"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://idcflare.com/"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "idcflare.com"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://www.idcflare.com"))
+        XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://forum.idcflare.net"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(baseURL: "https://cdk.linux.do"))
         XCTAssertTrue(ForumPolicy.isLinuxDoFamily(url: URL(string: "https://cdk.linux.do/redeem")!))
         XCTAssertFalse(ForumPolicy.isLinuxDoFamily(baseURL: "https://example.com"))
@@ -295,7 +440,10 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertNil(ForumPolicy.cloudflareInterstitialURL(for: "https://example.com"))
 
         XCTAssertTrue(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://linux.do"))
+        XCTAssertTrue(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "linux.do"))
         XCTAssertFalse(ForumPolicy.usesLinuxDoReadTimingsGuard(baseURL: "https://idcflare.com"))
+        XCTAssertEqual(ForumPolicy.host(fromBaseURL: "https://idcflare.com/"), "idcflare.com")
+        XCTAssertEqual(ForumPolicy.host(fromBaseURL: "idcflare.com"), "idcflare.com")
     }
 
     func testCloudflareChallengeWinsOverSuccessStatus() {
@@ -320,38 +468,120 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertEqual(failure.errorSummary, "HTTP 500")
     }
 
-    func testRepeatedFailuresNeverTripOrDisableTheToggle() throws {
-        let suiteName = "dexo-topic-timing-no-disable-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let settings = AppSettings(testingDefaults: defaults)
-        settings.linuxDoReadTimingsEnabled = true
-
-        var breaker = TopicTimingCircuitBreaker()
-        XCTAssertFalse(breaker.record(.failure, statusCode: 403))
-        XCTAssertFalse(breaker.isBlocked)
-        XCTAssertFalse(breaker.record(.cloudflareChallenge, statusCode: 403))
-        XCTAssertFalse(breaker.isBlocked)
-        XCTAssertFalse(breaker.record(.failure, statusCode: 429))
-        XCTAssertFalse(breaker.record(.failure, statusCode: 503))
-        XCTAssertFalse(breaker.record(.failure))
-        XCTAssertFalse(breaker.isTripped)
-        XCTAssertTrue(breaker.isBlocked)
-        XCTAssertGreaterThan(breaker.remainingBackoff, 0)
-        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
-
-        XCTAssertFalse(breaker.record(.success, statusCode: 200))
-        XCTAssertEqual(breaker.failureCount, 0)
-        XCTAssertFalse(breaker.isBlocked)
-        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+    func testThreeIdcflareFailuresDisableOnlyIdcflare() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            var breaker = TopicTimingCircuitBreaker()
+            XCTAssertEqual(TopicTimingCircuitBreaker.maximumFailures, 3)
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 500, baseURL: "https://www.idcflare.com"))
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+            XCTAssertTrue(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertTrue(breaker.isTripped)
+            XCTAssertFalse(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+        }
     }
 
+    func testThreeLinuxDoFailuresDisableOnlyLinuxDo() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            var breaker = TopicTimingCircuitBreaker()
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://linux.do"))
+            XCTAssertFalse(breaker.recordReportingOutcome(.cloudflareChallenge, statusCode: 403, baseURL: "https://meta.linux.do"))
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(breaker.recordReportingOutcome(.failure, baseURL: "https://linux.do"))
+            XCTAssertTrue(breaker.isTripped)
+            XCTAssertFalse(settings.linuxDoReadTimingsEnabled)
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertFalse(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
+            XCTAssertFalse(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://linux.do", isAuthenticated: true))
+            XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+            XCTAssertTrue(ForumPolicy.showsReadTimingUnreadDot(baseURL: "https://idcflare.com", isAuthenticated: true))
+        }
+    }
+
+    func testSuccessResetsConsecutiveFailureCount() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            var breaker = TopicTimingCircuitBreaker()
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 429, baseURL: "https://idcflare.com"))
+            XCTAssertEqual(breaker.failureCount, 2)
+            XCTAssertTrue(breaker.isBlocked)
+            XCTAssertFalse(breaker.recordReportingOutcome(.success, statusCode: 200, baseURL: "https://idcflare.com"))
+            XCTAssertEqual(breaker.failureCount, 0)
+            XCTAssertFalse(breaker.isBlocked)
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertTrue(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(settings.idcflareReadTimingsEnabled)
+            XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+        }
+    }
+
+    func testReenableAdvancesGenerationForThatSiteOnly() {
+        withIsolatedReadTimingSwitches(linuxDo: true, idcflare: true) { settings in
+            let linuxGeneration = settings.linuxDoReadTimingsActivationGeneration
+            let idcflareGeneration = settings.idcflareReadTimingsActivationGeneration
+            var breaker = TopicTimingCircuitBreaker()
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertTrue(breaker.recordReportingOutcome(.failure, statusCode: 403, baseURL: "https://idcflare.com"))
+            XCTAssertFalse(settings.idcflareReadTimingsEnabled)
+
+            settings.idcflareReadTimingsEnabled = true
+            XCTAssertEqual(settings.idcflareReadTimingsActivationGeneration, idcflareGeneration + 1)
+            XCTAssertEqual(
+                ForumPolicy.readTimingsActivationGeneration(baseURL: "https://idcflare.com"),
+                settings.idcflareReadTimingsActivationGeneration
+            )
+            XCTAssertEqual(settings.linuxDoReadTimingsActivationGeneration, linuxGeneration)
+            XCTAssertEqual(
+                ForumPolicy.readTimingsActivationGeneration(baseURL: "https://linux.do"),
+                settings.linuxDoReadTimingsActivationGeneration
+            )
+        }
+    }
+
+    private func withIsolatedReadTimingSwitches(
+        linuxDo: Bool,
+        idcflare: Bool,
+        _ body: (AppSettings) -> Void
+    ) {
+        let settings = AppSettings.shared
+        let originalLinuxDo = settings.linuxDoReadTimingsEnabled
+        let originalIdcflare = settings.idcflareReadTimingsEnabled
+        defer {
+            settings.linuxDoReadTimingsEnabled = originalLinuxDo
+            settings.idcflareReadTimingsEnabled = originalIdcflare
+        }
+        settings.linuxDoReadTimingsEnabled = linuxDo
+        settings.idcflareReadTimingsEnabled = idcflare
+        body(settings)
+    }
+}
+
+final class ManualReadTimingClock: @unchecked Sendable {
+    var time: CFTimeInterval
+    init(time: CFTimeInterval) { self.time = time }
+}
+
+final class ReadTimingAlgorithmTests: XCTestCase {
     func testRetryBackoffMatchesFluxDODelays() {
         XCTAssertEqual(ReadTimingAlgorithm.retryDelays, [5, 10, 20, 40])
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 0), 5)
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 1), 10)
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 2), 20)
         XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 3), 40)
+        XCTAssertEqual(ReadTimingAlgorithm.flushIntervalMs, 60_000)
         XCTAssertEqual(
             ReadTimingAlgorithm.retryableStatusCodes,
             [405, 429, 500, 501, 502, 503, 504]
@@ -363,5 +593,153 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: nil, outcome: .failure))
         XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 200, outcome: .cloudflareChallenge))
         XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 503, outcome: .cloudflareChallenge))
+    }
+
+    func testFormEncodingUsesTimingsPostNumberKeys() {
+        let query = TopicTimingsFormEncoder.queryString(
+            topicId: 42,
+            topicTime: 1500,
+            timings: [3: 800, 1: 1200]
+        )
+        XCTAssertEqual(query, "topic_id=42&topic_time=1500&timings[1]=1200&timings[3]=800")
+
+        let parameters = TopicTimingsFormEncoder.parameters(
+            topicId: 42,
+            topicTime: 1500,
+            timings: [3: 800, 1: 1200]
+        )
+        XCTAssertEqual(parameters["topic_id"] as? Int, 42)
+        XCTAssertEqual(parameters["topic_time"] as? Int, 1500)
+        XCTAssertEqual(parameters["timings[1]"] as? Int, 1200)
+        XCTAssertEqual(parameters["timings[3]"] as? Int, 800)
+        XCTAssertNil(parameters["timings"])
+    }
+
+    func testUnreadDotStaysUntilSessionSendEvenWhenServerRead() {
+        let clock = ManualReadTimingClock(time: 100)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 2, serverRead: true))
+        tracker.markServerRead(3)
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 3, serverRead: true))
+        XCTAssertTrue(
+            tracker.showsUnreadDot(postNumber: 5, serverRead: true, lastReadPostNumber: 4)
+        )
+
+        tracker.recordVisible(postNumber: 1)
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+        XCTAssertFalse(tracker.shouldPeriodicFlush())
+        let snapshot = tracker.snapshotDelta()
+        XCTAssertEqual(snapshot.timings[1], 1_000)
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: true))
+
+        tracker.commitSend()
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: true))
+        XCTAssertFalse(tracker.shouldRushFlush())
+    }
+
+    func testStareWithoutScrollStillRushesAfterLateVisibleSync() {
+        let clock = ManualReadTimingClock(time: 0)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+
+        clock.time += 60
+        XCTAssertFalse(tracker.shouldRushFlush())
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+
+        tracker.recordVisible(postNumber: 1)
+        XCTAssertFalse(tracker.shouldRushFlush())
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+
+        _ = tracker.snapshotDelta()
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        tracker.commitSend()
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+
+        tracker.recordVisible(postNumber: 1)
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+    }
+
+    func testSpuriousHideThenOnScreenReconcileStillRushes() {
+        let clock = ManualReadTimingClock(time: 10)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 1)
+        tracker.recordHidden(postNumber: 1)
+        XCTAssertFalse(tracker.shouldRushFlush())
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+
+        tracker.recordVisible(postNumber: 1)
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+        _ = tracker.snapshotDelta()
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+        tracker.commitSend()
+        XCTAssertFalse(tracker.showsUnreadDot(postNumber: 1, serverRead: false))
+    }
+
+    func testPeriodicFlushWaitsSixtySecondsAfterASend() {
+        let clock = ManualReadTimingClock(time: 0)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 1)
+        clock.time += 1
+        XCTAssertTrue(tracker.shouldRushFlush())
+        _ = tracker.snapshotDelta()
+        tracker.commitSend()
+
+        clock.time += 1
+        XCTAssertFalse(tracker.shouldRushFlush())
+        XCTAssertFalse(tracker.shouldPeriodicFlush())
+        clock.time += 59
+        XCTAssertTrue(tracker.shouldPeriodicFlush())
+    }
+
+    func testInFlightSnapshotConsolidatesAndNonRetryableDropDoesNotMarkRead() {
+        let clock = ManualReadTimingClock(time: 0)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.recordVisible(postNumber: 4)
+        clock.time += 1
+        let first = tracker.snapshotDelta()
+        XCTAssertEqual(first.timings[4], 1_000)
+
+        clock.time += 1
+        let second = tracker.snapshotDelta()
+        XCTAssertEqual(second.timings[4], 2_000)
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 4, serverRead: false))
+
+        tracker.dropInFlight()
+        XCTAssertTrue(tracker.showsUnreadDot(postNumber: 4, serverRead: false))
+        XCTAssertFalse(tracker.hasUnsentDelta())
+    }
+
+    func testPostReadFlagDecodesWithoutWordCount() throws {
+        let unread = try JSONDecoder().decode(
+            DiscourseTopicDetail.Post.self,
+            from: Data("""
+            {
+              "id": 1, "username": "alice", "cooked": "<p>hello world</p>",
+              "post_number": 1, "created_at": "2026-07-01T00:00:00.000Z"
+            }
+            """.utf8)
+        )
+        XCTAssertFalse(unread.read)
+
+        let alreadyRead = try JSONDecoder().decode(
+            DiscourseTopicDetail.Post.self,
+            from: Data("""
+            {
+              "id": 2, "username": "bob", "cooked": "<p>ignored</p>",
+              "post_number": 2, "created_at": "2026-07-01T00:00:00.000Z",
+              "word_count": 42, "read": true
+            }
+            """.utf8)
+        )
+        XCTAssertTrue(alreadyRead.read)
     }
 }

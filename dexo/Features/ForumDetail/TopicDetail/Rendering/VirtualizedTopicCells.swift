@@ -262,6 +262,7 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
     private let replyReferenceLabel = UILabel()
     private let timeLabel = UILabel()
     private let floorLabel = UILabel()
+    private let unreadTimingDot = ReadTimingUnreadDot()
     private let treeLineView = TreeLineView()
     private var avatarLeadingConstraint: NSLayoutConstraint!
     private var avatarWidthConstraint: NSLayoutConstraint!
@@ -269,6 +270,8 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
     private var flairWidthConstraint: NSLayoutConstraint!
     private var flairHeightConstraint: NSLayoutConstraint!
     private var username: String?
+    private(set) var trackedPostId: Int?
+    private(set) var trackedPostNumber: Int?
     var onAvatar: ((String) -> Void)?
     var onReplyReference: (() -> Void)?
 
@@ -303,6 +306,9 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         contentView.addSubview(flair)
         contentView.addSubview(userTitleLabel)
         contentView.addSubview(replyReferenceLabel)
+        contentView.addSubview(unreadTimingDot)
+        clipsToBounds = false
+        contentView.clipsToBounds = false
 
         avatarLeadingConstraint = avatar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12)
         avatarWidthConstraint = avatar.widthAnchor.constraint(equalToConstant: 32)
@@ -329,12 +335,15 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
             userTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: replyReferenceLabel.leadingAnchor, constant: -8),
             usernameLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
             usernameLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor),
-            replyReferenceLabel.trailingAnchor.constraint(equalTo: floorLabel.leadingAnchor, constant: -8),
+            replyReferenceLabel.trailingAnchor.constraint(equalTo: unreadTimingDot.leadingAnchor, constant: -8),
             replyReferenceLabel.centerYAnchor.constraint(equalTo: floorLabel.centerYAnchor),
-            timeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            timeLabel.trailingAnchor.constraint(equalTo: floorLabel.trailingAnchor),
             timeLabel.topAnchor.constraint(equalTo: floorLabel.bottomAnchor, constant: 2),
-            floorLabel.trailingAnchor.constraint(equalTo: timeLabel.trailingAnchor),
+            floorLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             floorLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            unreadTimingDot.trailingAnchor.constraint(equalTo: floorLabel.leadingAnchor, constant: -6),
+            unreadTimingDot.centerYAnchor.constraint(equalTo: floorLabel.centerYAnchor),
+            unreadTimingDot.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -8),
         ])
     }
 
@@ -345,10 +354,13 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         floor: Int,
         baseURL: String,
         isOP: Bool,
-        treeState: TreeLineState?
+        treeState: TreeLineState?,
+        showsUnreadDot: Bool = false
     ) {
         backgroundColor = ThemeManager.shared.cardBackgroundColor
         contentView.backgroundColor = ThemeManager.shared.cardBackgroundColor
+        trackedPostId = post.id
+        trackedPostNumber = post.postNumber
         username = post.username
         let avatarSize = FontManager.shared.scaled(32)
         let flairSize = FontManager.shared.scaled(14)
@@ -459,13 +471,19 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
             replyReferenceLabel.isHidden = true
             timeLabel.isHidden = true
             floorLabel.isHidden = true
+            self.unreadTimingDot.apply(showsDot: false, animated: false)
             avatar.sd_cancelCurrentImageLoad()
             avatar.image = nil
             flair.isHidden = true
         } else {
             usernameLabel.isHidden = false
             timeLabel.isHidden = false
+            updateUnreadDot(shows: showsUnreadDot, animated: false)
         }
+    }
+
+    func updateUnreadDot(shows: Bool, animated: Bool) {
+        unreadTimingDot.apply(showsDot: shows, animated: animated)
     }
 
     override func prepareForReuse() {
@@ -477,6 +495,9 @@ final class VirtualPostHeaderCell: UICollectionViewCell {
         flair.isHidden = true
         replyReferenceLabel.attributedText = nil
         replyReferenceLabel.isHidden = true
+        unreadTimingDot.apply(showsDot: false, animated: false)
+        trackedPostId = nil
+        trackedPostNumber = nil
         onAvatar = nil
         onReplyReference = nil
     }
