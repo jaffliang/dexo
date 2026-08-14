@@ -320,13 +320,48 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertEqual(failure.errorSummary, "HTTP 500")
     }
 
-    func testThirdConsecutiveFailureTripsAndSuccessResetsBreaker() {
+    func testRepeatedFailuresNeverTripOrDisableTheToggle() throws {
+        let suiteName = "dexo-topic-timing-no-disable-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(testingDefaults: defaults)
+        settings.linuxDoReadTimingsEnabled = true
+
         var breaker = TopicTimingCircuitBreaker()
+        XCTAssertFalse(breaker.record(.failure, statusCode: 403))
+        XCTAssertFalse(breaker.isBlocked)
+        XCTAssertFalse(breaker.record(.cloudflareChallenge, statusCode: 403))
+        XCTAssertFalse(breaker.isBlocked)
+        XCTAssertFalse(breaker.record(.failure, statusCode: 429))
+        XCTAssertFalse(breaker.record(.failure, statusCode: 503))
         XCTAssertFalse(breaker.record(.failure))
-        XCTAssertFalse(breaker.record(.cloudflareChallenge))
-        XCTAssertTrue(breaker.record(.failure))
-        XCTAssertTrue(breaker.isTripped)
-        XCTAssertFalse(breaker.record(.success))
+        XCTAssertFalse(breaker.isTripped)
+        XCTAssertTrue(breaker.isBlocked)
+        XCTAssertGreaterThan(breaker.remainingBackoff, 0)
+        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+
+        XCTAssertFalse(breaker.record(.success, statusCode: 200))
         XCTAssertEqual(breaker.failureCount, 0)
+        XCTAssertFalse(breaker.isBlocked)
+        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+    }
+
+    func testRetryBackoffMatchesFluxDODelays() {
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelays, [5, 10, 20, 40])
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 0), 5)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 1), 10)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 2), 20)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 3), 40)
+        XCTAssertEqual(
+            ReadTimingAlgorithm.retryableStatusCodes,
+            [405, 429, 500, 501, 502, 503, 504]
+        )
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 403, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 405, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 429, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 500, outcome: .failure))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: nil, outcome: .failure))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 200, outcome: .cloudflareChallenge))
+        XCTAssertFalse(ReadTimingAlgorithm.isRetryable(statusCode: 503, outcome: .cloudflareChallenge))
     }
 }
