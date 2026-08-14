@@ -45,4 +45,20 @@ final class DoHGatewayRuntimeTests: XCTestCase {
         XCTAssertFalse(reason.isEmpty)
         XCTAssertTrue(reason.localizedCaseInsensitiveContains("https"), reason)
     }
+
+    func testApplyAsyncInvalidURLCompletesWithoutHanging() {
+        let finished = expectation(description: "applyAsync")
+        let startedAt = Date()
+        DoHGatewayRuntime.shared.applyAsync(
+            enabled: true,
+            serverURLString: "http://dns.example.com/dns-query"
+        ) { ok in
+            XCTAssertFalse(ok)
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+            let reason = DoHGatewayRuntime.shared.lastError ?? ""
+            XCTAssertTrue(reason.localizedCaseInsensitiveContains("https"), reason)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 2)
+    }
 }

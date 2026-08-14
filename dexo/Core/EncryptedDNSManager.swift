@@ -12,50 +12,92 @@ final class EncryptedDNSManager {
 
     private init() {}
 
-    /// Applies the persisted preference before any URLSession-backed clients
-    /// are created. Returns false only when an enabled endpoint is invalid.
-    @discardableResult
-    func applyCurrentSettings() -> Bool {
+    /// Seeds preferences and kicks off the gateway off the main thread.
+    /// Returns immediately so first paint cannot block on `block_on(probe)`.
+    func applyCurrentSettings() {
         AppSettings.shared.seedDefaultDoHServersIfNeeded()
         installOnSharedImageDownloader()
         let settings = AppSettings.shared
-        guard !settings.dohEnabled || settings.defaultDoHServer != nil else {
-            settings.dohEnabled = false
-            return setEnabled(false, serverURLString: "")
+        guard settings.dohEnabled else {
+            applyAsync(enabled: false, serverURLString: "") { _ in }
+            return
         }
-        return setEnabled(
-            settings.dohEnabled,
-            serverURLString: settings.defaultDoHServer?.urlString ?? ""
-        )
+        guard let server = settings.defaultDoHServer,
+              DoHGatewayPolicy.isProxyEnablementAllowed(
+                isEnabled: true,
+                serverURLString: server.urlString
+              )
+        else {
+            settings.dohEnabled = false
+            applyAsync(enabled: false, serverURLString: "") { _ in }
+            return
+        }
+        applyAsync(enabled: true, serverURLString: server.urlString) { ok in
+            if DoHGatewayPolicy.shouldDisableDoHAfterLaunchStart(ok) {
+                AppSettings.shared.dohEnabled = false
+            }
+        }
     }
 
-    /// Updates encrypted name resolution for subsequent connections across
-    /// all forums and starts or stops the iOS 15 URLSession loopback gateway.
+    /// PrivacyContext / WKWebView teardown stay on the caller (main).
+    /// The Rust listener starts and stops on `DoHGatewayRuntime`'s serial queue.
+    func applyAsync(
+        enabled: Bool,
+        serverURLString: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        prepareSystemResolversForGatewayChange(enabled: enabled)
+        DoHGatewayRuntime.shared.applyAsync(
+            enabled: enabled,
+            serverURLString: serverURLString
+        ) { [self] ok in
+            if enabled && ok {
+                installOnSharedImageDownloader()
+                applyPrivacyContextIfAllowed(serverURLString: serverURLString)
+                completion(true)
+            } else {
+                disablePrivacyContext()
+                completion(!enabled || ok)
+            }
+        }
+    }
+
+    /// Synchronous path for tests that never reach FFI I/O. Production callers
+    /// must use `applyAsync` so start/stop never run on the main thread.
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
+        prepareSystemResolversForGatewayChange(enabled: enabled)
         guard enabled else {
-            privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
-            privacyContext.flushCache()
             DoHGatewayRuntime.shared.stop()
-            if #available(iOS 17.0, *) {
-                WebViewDoHProxy.shared.stop()
-            }
             return true
         }
 
+        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURLString) else {
+            disablePrivacyContext()
+            return false
+        }
+        installOnSharedImageDownloader()
+        applyPrivacyContextIfAllowed(serverURLString: serverURLString)
+        return true
+    }
+
+    private func prepareSystemResolversForGatewayChange(enabled: Bool) {
+        if !enabled {
+            disablePrivacyContext()
+        }
         if #available(iOS 17.0, *) {
             // Existing proxy sessions may keep resolved addresses and open
             // connections, so changing the resolver must rebuild them.
             WebViewDoHProxy.shared.stop()
         }
+    }
 
-        guard DoHGatewayRuntime.shared.setEnabled(true, serverURLString: serverURLString) else {
-            privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
-            privacyContext.flushCache()
-            return false
-        }
-        installOnSharedImageDownloader()
+    private func disablePrivacyContext() {
+        privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
+        privacyContext.flushCache()
+    }
 
+    private func applyPrivacyContextIfAllowed(serverURLString: String) {
         // iOS 15: the loopback gateway is the only ECH path. PrivacyContext
         // encrypted DNS resolves via DoH then handshakes TLS with visible SNI.
         // Any URLSession that misses the protocol (SDWebImage's already-built
@@ -71,10 +113,9 @@ final class EncryptedDNSManager {
             )
             privacyContext.requireEncryptedNameResolution(true, fallbackResolver: resolver)
         } else {
-            privacyContext.requireEncryptedNameResolution(false, fallbackResolver: nil)
+            disablePrivacyContext()
         }
         privacyContext.flushCache()
-        return true
     }
 
     /// Installs the gateway protocol on SDWebImage and drops any session that

@@ -143,6 +143,48 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(next, configuration: active))
     }
 
+    func testSettingsSwitchDoesNotCommitFailedDefaultWhileDoHIsOn() {
+        let previous = "custom-oaifree"
+        let candidate = "cloudflare"
+        XCTAssertEqual(
+            DoHGatewayPolicy.SettingsSwitch.afterStart(dohWasEnabled: true, startSucceeded: false),
+            DoHGatewayPolicy.SettingsSwitch(
+                commitNewDefault: false,
+                restorePreviousDefault: true,
+                keepEnabled: true
+            )
+        )
+        XCTAssertEqual(
+            DoHGatewayPolicy.persistedDefaultServerID(
+                previous: previous,
+                candidate: candidate,
+                dohWasEnabled: true,
+                startSucceeded: false
+            ),
+            previous
+        )
+        XCTAssertEqual(
+            DoHGatewayPolicy.persistedDefaultServerID(
+                previous: previous,
+                candidate: candidate,
+                dohWasEnabled: true,
+                startSucceeded: true
+            ),
+            candidate
+        )
+        XCTAssertEqual(
+            DoHGatewayPolicy.persistedDefaultServerID(
+                previous: previous,
+                candidate: candidate,
+                dohWasEnabled: false,
+                startSucceeded: false
+            ),
+            candidate
+        )
+        XCTAssertTrue(DoHGatewayPolicy.shouldDisableDoHAfterLaunchStart(false))
+        XCTAssertFalse(DoHGatewayPolicy.shouldDisableDoHAfterLaunchStart(true))
+    }
+
     func testMaterializeHTTPBodyReadsStream() {
         let body = Data("token=abc".utf8)
         var request = URLRequest(url: URL(string: "https://linux.do/hcaptcha/create.json")!)

@@ -196,4 +196,63 @@ public enum DoHGatewayPolicy {
         guard isEnabled else { return true }
         return normalizedDoHURL(serverURLString) != nil
     }
+
+    /// Outcome of switching the default DoH server (or toggling enablement).
+    /// Persist a new default only after a successful start when DoH is on.
+    public struct SettingsSwitch: Equatable, Sendable {
+        public var commitNewDefault: Bool
+        public var restorePreviousDefault: Bool
+        public var keepEnabled: Bool
+
+        public init(commitNewDefault: Bool, restorePreviousDefault: Bool, keepEnabled: Bool) {
+            self.commitNewDefault = commitNewDefault
+            self.restorePreviousDefault = restorePreviousDefault
+            self.keepEnabled = keepEnabled
+        }
+
+        /// `dohWasEnabled` is the toggle state before this start attempt.
+        /// When DoH is off, changing the default is just a preference write.
+        public static func afterStart(dohWasEnabled: Bool, startSucceeded: Bool) -> SettingsSwitch {
+            if !dohWasEnabled {
+                return SettingsSwitch(
+                    commitNewDefault: true,
+                    restorePreviousDefault: false,
+                    keepEnabled: false
+                )
+            }
+            if startSucceeded {
+                return SettingsSwitch(
+                    commitNewDefault: true,
+                    restorePreviousDefault: false,
+                    keepEnabled: true
+                )
+            }
+            return SettingsSwitch(
+                commitNewDefault: false,
+                restorePreviousDefault: true,
+                keepEnabled: true
+            )
+        }
+    }
+
+    /// Cold launch must not retry a resolver that just failed to start.
+    public static func shouldDisableDoHAfterLaunchStart(_ startSucceeded: Bool) -> Bool {
+        !startSucceeded
+    }
+
+    public static func persistedDefaultServerID<ID: Equatable>(
+        previous: ID?,
+        candidate: ID,
+        dohWasEnabled: Bool,
+        startSucceeded: Bool
+    ) -> ID? {
+        let decision = SettingsSwitch.afterStart(
+            dohWasEnabled: dohWasEnabled,
+            startSucceeded: startSucceeded
+        )
+        if decision.commitNewDefault {
+            return candidate
+        }
+        return previous
+    }
 }

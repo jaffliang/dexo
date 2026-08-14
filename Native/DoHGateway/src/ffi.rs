@@ -1,5 +1,6 @@
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -13,6 +14,10 @@ struct RunningGateway {
     port: u16,
     shutdown: watch::Sender<bool>,
 }
+
+/// Whole start + linux.do probe must finish inside this budget so a blocked
+/// built-in resolver cannot hang the caller (or the next cold launch).
+pub(crate) const START_BUDGET: Duration = Duration::from_secs(4);
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static STATE: Mutex<Option<RunningGateway>> = Mutex::new(None);
@@ -66,28 +71,36 @@ pub extern "C" fn dexo_doh_gateway_start(doh_url: *const c_char, preferred_port:
         return -1;
     }
 
-    let mut state = match STATE.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            set_last_error("DoH gateway lock poisoned");
-            return -3;
-        }
-    };
-    stop_locked(&mut state);
+    // Never hold STATE across resolver/probe I/O. A blocked Cloudflare
+    // probe previously froze the iOS main thread while this mutex was held.
+    if let Ok(mut state) = STATE.lock() {
+        stop_locked(&mut state);
+    } else {
+        set_last_error("DoH gateway lock poisoned");
+        return -3;
+    }
 
     let bind_addr = format!("127.0.0.1:{preferred_port}");
+    let url_owned = url.to_string();
     let started = runtime().block_on(async {
-        let tls = std::sync::Arc::new(GatewayTls::new());
-        let resolver = DohResolver::new(url, tls.clone()).await?;
-        resolver.probe().await?;
-        let listener = TcpListener::bind(&bind_addr)
-            .await
-            .map_err(|error| format!("bind {bind_addr}: {error}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|error| format!("listener address: {error}"))?
-            .port();
-        Ok::<_, String>((port, listener, resolver, tls))
+        tokio::time::timeout(START_BUDGET, async {
+            let tls = std::sync::Arc::new(GatewayTls::new());
+            let resolver = DohResolver::new(&url_owned, tls.clone()).await?;
+            let listener = TcpListener::bind(&bind_addr)
+                .await
+                .map_err(|error| format!("bind {bind_addr}: {error}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|error| format!("listener address: {error}"))?
+                .port();
+            resolver
+                .probe()
+                .await
+                .map_err(|error| format!("{error}"))?;
+            Ok::<_, String>((port, listener, resolver, tls))
+        })
+        .await
+        .map_err(|_| "DoH start timed out".to_string())?
     });
 
     let (port, listener, resolver, tls) = match started {
@@ -104,7 +117,17 @@ pub extern "C" fn dexo_doh_gateway_start(doh_url: *const c_char, preferred_port:
         gateway.serve(listener, rx).await;
     });
     eprintln!("[DoHGateway] listening on 127.0.0.1:{port} doh={url}");
-    *state = Some(RunningGateway { port, shutdown });
+    match STATE.lock() {
+        Ok(mut state) => {
+            stop_locked(&mut state);
+            *state = Some(RunningGateway { port, shutdown });
+        }
+        Err(_) => {
+            let _ = shutdown.send(true);
+            set_last_error("DoH gateway lock poisoned");
+            return -3;
+        }
+    }
     port as i32
 }
 
@@ -150,6 +173,15 @@ pub extern "C" fn dexo_doh_gateway_last_error() -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_budget_is_a_few_seconds() {
+        assert!(
+            START_BUDGET.as_secs() >= 3 && START_BUDGET.as_secs() <= 4,
+            "start/probe budget must be 3–4s, got {:?}",
+            START_BUDGET
+        );
+    }
 
     #[test]
     fn ech_compiled_matches_crate_feature() {

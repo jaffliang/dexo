@@ -13,6 +13,7 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
     )
     private var lastErrorStorage: String?
     private var didRegisterURLProtocol = false
+    private let workQueue = DispatchQueue(label: "com.eilgnaw.dexo.doh-gateway")
 
     private init() {}
 
@@ -45,6 +46,23 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         DoHGatewayURLProtocol.register(on: configuration)
     }
 
+    /// Starts or stops the Rust listener on a dedicated queue so `block_on(probe)`
+    /// never runs on the main thread (settings freeze / next-launch black screen).
+    func applyAsync(
+        enabled: Bool,
+        serverURLString: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        workQueue.async { [self] in
+            let ok = self.setEnabled(enabled, serverURLString: serverURLString)
+            DispatchQueue.main.async {
+                completion(ok)
+            }
+        }
+    }
+
+    /// Synchronous start/stop. Call from `workQueue` or tests that return
+    /// before FFI I/O (invalid URL). A real start `block_on`s the probe.
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         stopListener()
