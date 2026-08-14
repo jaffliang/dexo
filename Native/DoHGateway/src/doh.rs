@@ -15,8 +15,6 @@ use crate::http;
 use crate::tls::GatewayTls;
 
 const DOH_TIMEOUT: Duration = Duration::from_secs(8);
-const HTTPS_RR_BOUND: Duration = Duration::from_secs(2);
-const AAAA_WHEN_A_OK: Duration = Duration::from_secs(1);
 const SYSTEM_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_NAME: &str = "linux.do";
 
@@ -61,45 +59,33 @@ impl DohResolver {
     pub async fn lookup(&self, name: &str) -> Result<Lookup, String> {
         let mut combined = Lookup::default();
 
-        let https_fut = tokio::time::timeout(HTTPS_RR_BOUND, self.query(name, TYPE_HTTPS));
-        let a_fut = self.query(name, TYPE_A);
-        let (https_part, a_part) = tokio::join!(https_fut, a_fut);
+        let (https_part, a_part) = tokio::join!(self.query(name, TYPE_HTTPS), self.query(name, TYPE_A));
 
         match https_part {
-            Ok(Ok(part)) => {
+            Ok(part) => {
                 combined.https.extend(part.https);
                 combined.ipv4.extend(part.ipv4);
                 combined.ipv6.extend(part.ipv6);
             }
-            Ok(Err(error)) => tracing_log(&format!("HTTPS RR lookup skipped: {error}")),
-            Err(_) => tracing_log("HTTPS RR lookup timed out"),
+            Err(error) => tracing_log(&format!("HTTPS RR lookup skipped: {error}")),
         }
 
-        let a_ok = match a_part {
+        match a_part {
             Ok(part) => {
                 combined.ipv4.extend(part.ipv4);
                 combined.ipv6.extend(part.ipv6);
                 combined.https.extend(part.https);
-                true
             }
             Err(error) => {
                 if combined.ipv4.is_empty() && combined.ipv6.is_empty() {
                     tracing_log(&format!("A lookup failed: {error}"));
                 }
-                false
             }
-        };
+        }
 
-        if a_ok {
-            match tokio::time::timeout(AAAA_WHEN_A_OK, self.query(name, TYPE_AAAA)).await {
-                Ok(Ok(part)) => {
-                    combined.ipv4.extend(part.ipv4);
-                    combined.ipv6.extend(part.ipv6);
-                }
-                Ok(Err(error)) => tracing_log(&format!("AAAA lookup skipped: {error}")),
-                Err(_) => tracing_log("AAAA lookup timed out after A succeeded"),
-            }
-        } else {
+        // Jeff's Wi-Fi has no IPv6 route. When A or ipv4hint exists, never
+        // query or keep AAAA — IPv6 no-route must not become the last error.
+        if combined.ipv4.is_empty() {
             match self.query(name, TYPE_AAAA).await {
                 Ok(part) => {
                     combined.ipv4.extend(part.ipv4);
@@ -111,6 +97,8 @@ impl DohResolver {
                     }
                 }
             }
+        } else {
+            combined.ipv6.clear();
         }
 
         combined.ipv4.sort();

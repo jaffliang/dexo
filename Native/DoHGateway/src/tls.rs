@@ -77,7 +77,9 @@ impl GatewayTls {
                     }
                 }
                 Err(error) => {
-                    eprintln!("[DoHGateway] ignoring unusable ECH config for {host}: {error}");
+                    // Do not handshake visible SNI on this burned-or-unused
+                    // stream; the caller retries with a short timeout.
+                    return Err(format!("ECH config {host}: {error}"));
                 }
             }
         }
@@ -224,5 +226,33 @@ mod tests {
             name,
             NamedGroup::X25519MLKEM768 | NamedGroup::secp256r1MLKEM768 | NamedGroup::MLKEM768
         )));
+    }
+
+    #[cfg(feature = "ech")]
+    #[test]
+    fn linux_do_https_ech_is_usable() {
+        let message = hex(
+            "111181800001000100000000056c696e757802646f0000410001c00c004100010000012c0088\
+             0001000001000602683302683200040008681410eaac42a63d000500470045fe0d0041b50020\
+             0020121ae8bca202378d31efc2e5db4cce83f4a8ed582ec5e043b69e362c42e7ab0f00040001\
+             00010012636c6f7564666c6172652d6563682e636f6d00000006002026064700001000000000\
+             0000681410ea260647000010000000000000ac42a63d",
+        );
+        let lookup = crate::dns::decode_lookup(&message, 0x1111).unwrap();
+        let ech = lookup.https[0].ech_config.as_ref().expect("ECH present");
+        assert!(
+            ech_client_config(ech).is_ok(),
+            "rustls rejected linux.do ECH: {:?}",
+            ech_client_config(ech).err()
+        );
+    }
+
+    #[cfg(feature = "ech")]
+    fn hex(input: &str) -> Vec<u8> {
+        let compact: String = input.chars().filter(|ch| !ch.is_whitespace()).collect();
+        (0..compact.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&compact[index..index + 2], 16).unwrap())
+            .collect()
     }
 }

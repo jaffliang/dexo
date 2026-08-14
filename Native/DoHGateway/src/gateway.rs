@@ -14,6 +14,8 @@ use crate::http::{self, MAX_BODY_BYTES, MAX_HEADER_BYTES};
 use crate::tls::GatewayTls;
 
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const VISIBLE_SNI_TIMEOUT: Duration = Duration::from_secs(2);
 
 const HOST_HEADER: &str = "x-dexo-gateway-host";
 const PORT_HEADER: &str = "x-dexo-gateway-port";
@@ -98,8 +100,9 @@ impl Gateway {
             .iter()
             .filter_map(|record| record.ech_config.clone())
             .next();
-        let used_ech = ech_config.is_some();
+        let ech_present = ech_config.is_some();
 
+        let mut last_ipv4_error = None;
         let mut last_error = "all upstream addresses failed".to_string();
         for ip in addresses {
             let addr = SocketAddr::new(ip, upstream.port);
@@ -111,7 +114,7 @@ impl Gateway {
                         upstream.host,
                         addr,
                         lookup_summary(&lookup),
-                        used_ech && response.1
+                        ech_present && response.1
                     );
                     client
                         .write_all(&response.0)
@@ -119,10 +122,23 @@ impl Gateway {
                         .map_err(|error| format!("client write: {error}"))?;
                     return Ok(());
                 }
-                Err(error) => last_error = error,
+                Err(error) => {
+                    let formatted = format_attempt_error(addr, ech_present, &error);
+                    if addr.is_ipv4() {
+                        last_ipv4_error = Some(formatted.clone());
+                    }
+                    if addr.is_ipv4() || last_ipv4_error.is_none() {
+                        last_error = formatted;
+                    }
+                }
             }
         }
-        write_error(&mut client, 502, &last_error).await
+        write_error(
+            &mut client,
+            502,
+            last_ipv4_error.as_deref().unwrap_or(&last_error),
+        )
+        .await
     }
 
     async fn forward(
@@ -134,34 +150,90 @@ impl Gateway {
     ) -> Result<(Vec<u8>, bool), String> {
         if let Some(config) = ech_config {
             let stream = connect_tcp(addr).await?;
-            match self.tls.connect(&upstream.host, stream, Some(config)).await {
-                Ok((tls, used_ech)) => {
+            match tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                self.tls.connect(&upstream.host, stream, Some(config)),
+            )
+            .await
+            {
+                Ok(Ok((tls, true))) => {
                     let bytes = proxy_http(tls, request, upstream).await?;
-                    return Ok((bytes, used_ech));
+                    return Ok((bytes, true));
                 }
-                Err(error) => {
+                Ok(Ok((tls, false))) => {
+                    let bytes = proxy_http(tls, request, upstream).await?;
+                    return Ok((bytes, false));
+                }
+                Ok(Err(error)) => {
                     eprintln!(
-                        "[DoHGateway] ECH handshake {addr} failed ({error}); falling back to visible SNI on a new TCP connection"
+                        "[DoHGateway] ECH handshake {addr} failed ({error}); visible SNI fallback ≤2s"
                     );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[DoHGateway] ECH handshake {addr} timed out; visible SNI fallback ≤2s"
+                    );
+                    // Keep going to the short visible-SNI retry; if that also
+                    // dies, format_attempt_error reports "TLS timeout".
                 }
             }
         }
 
-        let stream = connect_tcp(addr).await?;
-        let tls = self
-            .tls
-            .connect_visible_sni(&upstream.host, stream)
-            .await?;
+        let stream = connect_tcp_within(addr, VISIBLE_SNI_TIMEOUT).await?;
+        let tls = tokio::time::timeout(
+            VISIBLE_SNI_TIMEOUT,
+            self.tls.connect_visible_sni(&upstream.host, stream),
+        )
+        .await
+        .map_err(|_| "TLS timeout".to_string())??;
         let bytes = proxy_http(tls, request, upstream).await?;
         Ok((bytes, false))
     }
 }
 
 async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
-    tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr))
-        .await
-        .map_err(|_| format!("connect timeout {addr}"))?
-        .map_err(|error| format!("connect {addr}: {error}"))
+    connect_tcp_within(addr, CONNECT_TIMEOUT).await
+}
+
+async fn connect_tcp_within(addr: SocketAddr, limit: Duration) -> Result<TcpStream, String> {
+    match tokio::time::timeout(limit, TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) if is_no_route(&error) => {
+            Err(format!("connect {addr}: No route to host"))
+        }
+        Ok(Err(error)) => Err(format!("connect {addr}: {error}")),
+        Err(_) => Err(format!("connect timeout {addr}")),
+    }
+}
+
+fn is_no_route(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable
+    ) || matches!(error.raw_os_error(), Some(51 | 65 | 101 | 113))
+}
+
+fn format_attempt_error(addr: SocketAddr, ech_present: bool, error: &str) -> String {
+    let family = if addr.is_ipv4() { "IPv4" } else { "IPv6" };
+    let ech = if ech_present { "yes" } else { "no" };
+    let detail = if is_no_route_text(error) {
+        "No route to host"
+    } else if error.contains("connect timeout") {
+        "connect timeout"
+    } else if error.contains("timeout") || error.contains("timed out") {
+        "TLS timeout"
+    } else {
+        error
+    };
+    format!("{family} {} ech={ech} {detail}", addr.ip())
+}
+
+fn is_no_route_text(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("no route to host")
+        || lower.contains("network is unreachable")
+        || lower.contains("os error 65")
+        || lower.contains("os error 51")
 }
 
 async fn proxy_http<S>(
@@ -327,10 +399,20 @@ fn is_hop_by_hop(name: &str) -> bool {
 }
 
 fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<std::net::IpAddr> {
-    let mut addresses = Vec::new();
-    addresses.extend(lookup.ipv4.iter().copied().map(std::net::IpAddr::V4));
-    addresses.extend(lookup.ipv6.iter().copied().map(std::net::IpAddr::V6));
-    addresses
+    if !lookup.ipv4.is_empty() {
+        return lookup
+            .ipv4
+            .iter()
+            .copied()
+            .map(std::net::IpAddr::V4)
+            .collect();
+    }
+    lookup
+        .ipv6
+        .iter()
+        .copied()
+        .map(std::net::IpAddr::V6)
+        .collect()
 }
 
 fn lookup_summary(lookup: &crate::dns::Lookup) -> String {
@@ -554,5 +636,43 @@ mod tests {
     fn gateway_error_json_escapes_quotes() {
         let response = String::from_utf8(gateway_error_response(502, r#"TLS handshake "linux.do""#)).unwrap();
         assert!(response.contains(r#"{"errors":["DoH gateway: TLS handshake \"linux.do\""]}"#));
+    }
+
+    #[test]
+    fn ipv4_present_skips_ipv6_addresses() {
+        let lookup = crate::dns::Lookup {
+            ipv4: vec!["104.20.16.234".parse().unwrap(), "172.66.166.61".parse().unwrap()],
+            ipv6: vec!["2606:4700:10::6814:10ea".parse().unwrap()],
+            https: Vec::new(),
+        };
+        let addresses = ordered_addresses(&lookup);
+        assert_eq!(addresses.len(), 2);
+        assert!(addresses.iter().all(|ip| ip.is_ipv4()));
+    }
+
+    #[test]
+    fn ipv6_used_only_without_ipv4() {
+        let lookup = crate::dns::Lookup {
+            ipv4: Vec::new(),
+            ipv6: vec!["2606:4700:10::6814:10ea".parse().unwrap()],
+            https: Vec::new(),
+        };
+        let addresses = ordered_addresses(&lookup);
+        assert_eq!(addresses.len(), 1);
+        assert!(addresses[0].is_ipv6());
+    }
+
+    #[test]
+    fn attempt_error_names_family_ech_and_tls_timeout() {
+        let addr: SocketAddr = "104.20.16.234:443".parse().unwrap();
+        assert_eq!(
+            format_attempt_error(addr, true, "TLS timeout"),
+            "IPv4 104.20.16.234 ech=yes TLS timeout"
+        );
+        let v6: SocketAddr = "[2606:4700:10::6814:10ea]:443".parse().unwrap();
+        assert_eq!(
+            format_attempt_error(v6, true, "connect [2606:4700:10::6814:10ea]:443 No route to host (os error 65)"),
+            "IPv6 2606:4700:10::6814:10ea ech=yes No route to host"
+        );
     }
 }
