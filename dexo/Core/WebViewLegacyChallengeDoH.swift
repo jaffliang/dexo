@@ -126,12 +126,7 @@ final class WebViewLegacyChallengeSession: @unchecked Sendable {
 /// Does not start a CONNECT listener.
 enum WebViewLegacyProxyRecovery {
     static func clearLeakedProxies() {
-        if #available(iOS 17.0, *) {
-            WKWebsiteDataStore.default().proxyConfigurations = []
-            WebCookieStore.shared.websiteDataStore.proxyConfigurations = []
-        }
-        WebViewDoHChallengeSPI.clearLegacyProxyConfiguration(on: WKWebsiteDataStore.default())
-        WebViewDoHChallengeSPI.clearLegacyProxyConfiguration(on: WebCookieStore.shared.websiteDataStore)
+        EncryptedDNSManager.shared.clearLeftoverWebKitHTTPProxies()
     }
 }
 

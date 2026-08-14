@@ -2,6 +2,7 @@ import DoHGatewayPolicy
 import Foundation
 import Network
 import SDWebImage
+import WebKit
 
 final class EncryptedDNSManager {
     static let shared = EncryptedDNSManager()
@@ -15,9 +16,10 @@ final class EncryptedDNSManager {
     /// Seeds preferences and kicks off the gateway off the main thread.
     /// Returns immediately so first paint cannot block on `block_on(probe)`.
     func applyCurrentSettings() {
-        // challenge2 leftover `_setProxyConfiguration:` on the persistent
-        // jars. Clear-only; does not start a CONNECT listener.
-        WebViewLegacyProxyRecovery.clearLeakedProxies()
+        // Strip leftover `_setProxyConfiguration:` before any URLSession work.
+        // A previous debug IPA applied that SPI to the shared cookie jar; it
+        // is not WebView-scoped and can time out URLSession DoH.
+        clearLeftoverWebKitHTTPProxies()
         AppSettings.shared.seedDefaultDoHServersIfNeeded()
         installOnSharedImageDownloader()
         let settings = AppSettings.shared
@@ -50,7 +52,6 @@ final class EncryptedDNSManager {
         completion: @escaping (Bool) -> Void
     ) {
         prepareSystemResolversForGatewayChange(enabled: enabled)
-        WebViewLegacyProxyRecovery.clearLeakedProxies()
         DoHGatewayRuntime.shared.applyAsync(
             enabled: enabled,
             serverURLString: serverURLString
@@ -71,7 +72,6 @@ final class EncryptedDNSManager {
     @discardableResult
     func setEnabled(_ enabled: Bool, serverURLString: String) -> Bool {
         prepareSystemResolversForGatewayChange(enabled: enabled)
-        WebViewLegacyProxyRecovery.clearLeakedProxies()
         guard enabled else {
             DoHGatewayRuntime.shared.stop()
             return true
@@ -90,11 +90,31 @@ final class EncryptedDNSManager {
         if !enabled {
             disablePrivacyContext()
         }
+        // Also run on DoH toggle. Does not start a CONNECT listener.
+        clearLeftoverWebKitHTTPProxies()
         if #available(iOS 17.0, *) {
             // Existing proxy sessions may keep resolved addresses and open
             // connections, so changing the resolver must rebuild them.
             WebViewDoHProxy.shared.stop()
         }
+    }
+
+    /// Clears leftover HTTP proxy settings on the process-shared website
+    /// data stores. Does not apply a proxy or start a listener.
+    func clearLeftoverWebKitHTTPProxies() {
+        let defaultStore = WKWebsiteDataStore.default()
+        clearLeftoverWebKitHTTPProxy(on: defaultStore)
+        let cookieStore = WebCookieStore.shared.websiteDataStore
+        if cookieStore !== defaultStore {
+            clearLeftoverWebKitHTTPProxy(on: cookieStore)
+        }
+    }
+
+    private func clearLeftoverWebKitHTTPProxy(on dataStore: WKWebsiteDataStore) {
+        if #available(iOS 17.0, *) {
+            dataStore.proxyConfigurations = []
+        }
+        WKWebsiteDataStore.dexo_clearProxyConfiguration(dataStore)
     }
 
     private func disablePrivacyContext() {
