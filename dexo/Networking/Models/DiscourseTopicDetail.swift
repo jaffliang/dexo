@@ -302,6 +302,8 @@ struct DiscourseTopicDetail: Decodable {
         let createdAt: String
         let cooked: String
         let raw: String?
+        let wordCount: Int
+        let read: Bool
         let postNumber: Int
         let replyCount: Int
         let replyToPostNumber: Int?
@@ -357,6 +359,8 @@ struct DiscourseTopicDetail: Decodable {
 
         enum CodingKeys: String, CodingKey {
             case id, name, username, cooked, raw
+            case wordCount = "word_count"
+            case read
             case avatarTemplate = "avatar_template"
             case createdAt = "created_at"
             case postNumber = "post_number"
@@ -402,6 +406,9 @@ struct DiscourseTopicDetail: Decodable {
             createdAt = (try? container.decodeIfPresent(String.self, forKey: .createdAt)) ?? ""
             cooked = (try? container.decodeIfPresent(String.self, forKey: .cooked)) ?? ""
             raw = try? container.decodeIfPresent(String.self, forKey: .raw)
+            let decodedWordCount = (try? container.decodeIfPresent(Int.self, forKey: .wordCount)) ?? 0
+            wordCount = decodedWordCount > 0 ? decodedWordCount : CookedWordCounter.count(cooked)
+            read = (try? container.decodeIfPresent(Bool.self, forKey: .read)) ?? false
             postNumber = (try? container.decodeIfPresent(Int.self, forKey: .postNumber)) ?? 0
             replyCount = (try? container.decodeIfPresent(Int.self, forKey: .replyCount)) ?? 0
             replyToPostNumber = try? container.decodeIfPresent(Int.self, forKey: .replyToPostNumber)

@@ -174,11 +174,14 @@ final class RepliesViewController: BaseViewController {
     }
 
     private func resumeReadTracking() {
+        readTracker.unfreeze()
         readTracker.startSession()
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   case .post(let postId) = item,
                   let post = replies.first(where: { $0.id == postId }) else { continue }
+            readTracker.setWordCount(post.wordCount, forPostNumber: post.postNumber)
+            if post.read { readTracker.markServerRead(post.postNumber) }
             readTracker.recordVisible(postNumber: post.postNumber)
         }
     }
@@ -203,12 +206,21 @@ final class RepliesViewController: BaseViewController {
         guard !snap.timings.isEmpty else { return }
         let topicId = self.topicId
         let api = self.api
-        Task.detached {
-            try? await api.postTopicTimings(
-                topicId: topicId,
-                topicTime: snap.topicTime,
-                timings: snap.timings
-            )
+        Task { [weak self] in
+            do {
+                try await api.postTopicTimings(
+                    topicId: topicId,
+                    topicTime: snap.topicTime,
+                    timings: snap.timings
+                )
+                await MainActor.run { self?.readTracker.commitSend() }
+            } catch is TopicTimingBackoffError {
+                await MainActor.run { self?.readTracker.revertSend() }
+            } catch let error as DiscourseAPIError where error.errorType == "challenge_required" {
+                await MainActor.run { self?.readTracker.freezeForChallenge() }
+            } catch {
+                await MainActor.run { self?.readTracker.revertSend() }
+            }
         }
     }
 
@@ -265,6 +277,8 @@ extension RepliesViewController: UITableViewDelegate {
         guard let item = dataSource.itemIdentifier(for: indexPath),
               case .post(let postId) = item,
               let post = replies.first(where: { $0.id == postId }) else { return }
+        readTracker.setWordCount(post.wordCount, forPostNumber: post.postNumber)
+        if post.read { readTracker.markServerRead(post.postNumber) }
         readTracker.recordVisible(postNumber: post.postNumber)
     }
 

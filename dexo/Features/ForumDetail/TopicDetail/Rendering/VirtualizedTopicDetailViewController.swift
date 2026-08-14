@@ -101,9 +101,12 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private let jumpScrubMoveThreshold: CGFloat = 8
     private let readTracker = TopicReadTracker()
     private var readFlushTimer: Timer?
+    private var readTickTimer: Timer?
     private var pendingReadFlush: DispatchWorkItem?
+    private var isFlushingReadTimings = false
     private static let readFlushInterval: TimeInterval = 60
     private static let readFlushDebounce: TimeInterval = 1.5
+    private static let readTickInterval: TimeInterval = 1
     private let imageZoomTransition = ImageZoomTransitionDelegate()
     private lazy var boostDanmaku = BoostDanmakuOverlay(hostView: view)
     private let floatingReplyButton = FloatingReplyButton()
@@ -169,7 +172,8 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
                 floor: floor,
                 baseURL: self.baseURL,
                 isOP: post.username == self.viewModel.opUsername,
-                treeState: self.viewModel.isTreeMode ? self.viewModel.postTreeLineStates[postId] : nil
+                treeState: self.viewModel.isTreeMode ? self.viewModel.postTreeLineStates[postId] : nil,
+                countdownState: self.readCountdownState(for: post)
             )
             cell.onAvatar = { [weak self] in self?.postCell(didTapAvatarForUsername: $0) }
             cell.onReplyReference = { [weak self] in self?.postCell(didTapReplyReferenceForPost: post) }
@@ -521,6 +525,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         super.viewWillAppear(animated)
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
@@ -528,6 +533,7 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
         super.viewWillDisappear(animated)
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
         readTracker.pause()
         cancelAllImagePrefetches()
@@ -690,24 +696,57 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     @objc private func appDidEnterBackground() {
         cancelPendingReadFlush()
         stopReadFlushTimer()
+        stopReadTickTimer()
         flushReadTimings()
-        readTracker.pause()
+        readTracker.setHasFocus(false)
     }
 
     @objc private func appWillEnterForeground() {
+        readTracker.setHasFocus(true)
         resumeReadTracking()
         startReadFlushTimer()
+        startReadTickTimer()
         scheduleDebouncedReadFlush()
     }
 
     private func resumeReadTracking() {
+        readTracker.unfreeze()
         readTracker.startSession()
         for indexPath in collectionView.indexPathsForVisibleItems {
             guard let item = dataSource.itemIdentifier(for: indexPath),
                   let postId = postIdByItem[item],
                   let post = viewModel.postsById[postId]
             else { continue }
+            prepareReadTracking(for: post)
             readTracker.recordVisible(postNumber: post.postNumber)
+        }
+        refreshVisibleReadCountdowns()
+    }
+
+    private func prepareReadTracking(for post: DiscourseTopicDetail.Post) {
+        readTracker.setWordCount(post.wordCount, forPostNumber: post.postNumber)
+        if post.read {
+            readTracker.markServerRead(post.postNumber)
+        }
+    }
+
+    private func readCountdownState(for post: DiscourseTopicDetail.Post) -> ReadTimingCountdownState {
+        guard ForumPolicy.showsReadTimingCountdown(baseURL: baseURL),
+              !post.deletedPostPlaceholder
+        else { return .hidden }
+        prepareReadTracking(for: post)
+        return readTracker.countdownState(forPostNumber: post.postNumber)
+    }
+
+    private func refreshVisibleReadCountdowns() {
+        guard ForumPolicy.showsReadTimingCountdown(baseURL: baseURL) else { return }
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            guard let item = dataSource.itemIdentifier(for: indexPath),
+                  case .header(let postId) = item,
+                  let post = viewModel.postsById[postId],
+                  let cell = collectionView.cellForItem(at: indexPath) as? VirtualPostHeaderCell
+            else { continue }
+            cell.updateReadCountdown(readCountdownState(for: post))
         }
     }
 
@@ -723,6 +762,24 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     private func stopReadFlushTimer() {
         readFlushTimer?.invalidate()
         readFlushTimer = nil
+    }
+
+    private func startReadTickTimer() {
+        stopReadTickTimer()
+        let timer = Timer(timeInterval: Self.readTickInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.refreshVisibleReadCountdowns()
+            if self.readTracker.shouldRushFlush() {
+                self.flushReadTimings()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readTickTimer = timer
+    }
+
+    private func stopReadTickTimer() {
+        readTickTimer?.invalidate()
+        readTickTimer = nil
     }
 
     private func scheduleDebouncedReadFlush() {
@@ -741,16 +798,40 @@ final class VirtualizedTopicDetailViewController: ObservableViewController, UIGe
     }
 
     private func flushReadTimings() {
+        guard !isFlushingReadTimings else { return }
         let snapshot = readTracker.snapshotDelta()
         guard !snapshot.timings.isEmpty else { return }
+        isFlushingReadTimings = true
         let api = api
         let topicId = topicId
-        Task.detached {
-            try? await api.postTopicTimings(
-                topicId: topicId,
-                topicTime: snapshot.topicTime,
-                timings: snapshot.timings
-            )
+        Task { [weak self] in
+            do {
+                try await api.postTopicTimings(
+                    topicId: topicId,
+                    topicTime: snapshot.topicTime,
+                    timings: snapshot.timings
+                )
+                await MainActor.run {
+                    self?.readTracker.commitSend()
+                    self?.isFlushingReadTimings = false
+                    self?.refreshVisibleReadCountdowns()
+                }
+            } catch is TopicTimingBackoffError {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.isFlushingReadTimings = false
+                }
+            } catch let error as DiscourseAPIError where error.errorType == "challenge_required" {
+                await MainActor.run {
+                    self?.readTracker.freezeForChallenge()
+                    self?.isFlushingReadTimings = false
+                }
+            } catch {
+                await MainActor.run {
+                    self?.readTracker.revertSend()
+                    self?.isFlushingReadTimings = false
+                }
+            }
         }
     }
 
@@ -1625,7 +1706,10 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
         if let postId = postIdByItem[item], let post = viewModel.postsById[postId] {
             let count = visibleItemCountsByPost[postId, default: 0]
             visibleItemCountsByPost[postId] = count + 1
-            if count == 0 { readTracker.recordVisible(postNumber: post.postNumber) }
+            if count == 0 {
+                prepareReadTracking(for: post)
+                readTracker.recordVisible(postNumber: post.postNumber)
+            }
         }
         guard indexPath.item >= collectionView.numberOfItems(inSection: 0) - 3,
               !isLoadingPage,
@@ -1702,6 +1786,7 @@ extension VirtualizedTopicDetailViewController: UICollectionViewDelegate, UIColl
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        readTracker.markScrolled()
         let currentOffset = scrollView.contentOffset.y
         let isMovingTowardEarlierPosts = currentOffset < lastScrollOffset
         lastScrollOffset = currentOffset

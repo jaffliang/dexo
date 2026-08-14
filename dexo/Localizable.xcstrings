@@ -6338,18 +6338,81 @@
       }
     },
     "settings.read_timings.footer" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do reporting is off by default and may trigger site protection. After 3 consecutive failures, including a Cloudflare challenge, Dexo turns it off automatically. Complete the challenge before enabling it again."
+            "value" : "linux.do reporting is off by default and may trigger site protection. Transient 403/429/network errors retry with backoff. The switch stays on; check report history for status."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "linux.do 阅读时间上报默认关闭，开启后可能触发站点防护。连续失败 3 次（包括 Cloudflare 验证/撞盾）后会自动关闭；请完成验证后再手动开启。"
+            "value" : "linux.do 阅读时间上报默认关闭，开启后可能触发站点防护。遇到 403/429/网络错误会自动退避重试，开关保持开启。可在上报记录中查看状态。"
+          }
+        }
+      }
+    },
+    "settings.read_timings.retrying %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read-time report failed. Retrying in %lld seconds."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阅读时间上报失败，将在 %lld 秒后重试。"
+          }
+        }
+      }
+    },
+    "settings.read_timings.error %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read-time report failed: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阅读时间上报失败：%@"
+          }
+        }
+      }
+    },
+    "read_timings.countdown.complete" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Post marked as read"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "帖子已计为已读"
+          }
+        }
+      }
+    },
+    "read_timings.countdown.remaining %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld seconds remaining until this post is read"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "距本帖计为已读还剩 %lld 秒"
           }
         }
       }

@@ -269,6 +269,10 @@ final class TopicTimingPolicyTests: XCTestCase {
         settings.linuxDoReadTimingsEnabled = true
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://linux.do"))
         XCTAssertTrue(ForumPolicy.tracksReadTimings(baseURL: "https://idcflare.com"))
+        XCTAssertTrue(ForumPolicy.showsReadTimingCountdown(baseURL: "https://linux.do"))
+        XCTAssertFalse(ForumPolicy.showsReadTimingCountdown(baseURL: "https://idcflare.com"))
+        settings.linuxDoReadTimingsEnabled = false
+        XCTAssertFalse(ForumPolicy.showsReadTimingCountdown(baseURL: "https://linux.do"))
     }
 
     func testLinuxDoFamilyIncludesIdcflareWithoutSharingChallengeURL() {
@@ -320,13 +324,133 @@ final class TopicTimingPolicyTests: XCTestCase {
         XCTAssertEqual(failure.errorSummary, "HTTP 500")
     }
 
-    func testThirdConsecutiveFailureTripsAndSuccessResetsBreaker() {
+    func testRepeatedFailuresNeverTripOrDisableTheToggle() {
+        let suiteName = "dexo-topic-timing-no-disable-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(testingDefaults: defaults)
+        settings.linuxDoReadTimingsEnabled = true
+
         var breaker = TopicTimingCircuitBreaker()
+        XCTAssertFalse(breaker.record(.failure, statusCode: 403))
+        XCTAssertFalse(breaker.record(.cloudflareChallenge, statusCode: 403))
+        XCTAssertFalse(breaker.record(.failure, statusCode: 429))
+        XCTAssertFalse(breaker.record(.failure, statusCode: 503))
         XCTAssertFalse(breaker.record(.failure))
-        XCTAssertFalse(breaker.record(.cloudflareChallenge))
-        XCTAssertTrue(breaker.record(.failure))
-        XCTAssertTrue(breaker.isTripped)
-        XCTAssertFalse(breaker.record(.success))
+        XCTAssertFalse(breaker.isTripped)
+        XCTAssertTrue(breaker.isBlocked)
+        XCTAssertGreaterThan(breaker.remainingBackoff, 0)
+        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+
+        XCTAssertFalse(breaker.record(.success, statusCode: 200))
         XCTAssertEqual(breaker.failureCount, 0)
+        XCTAssertFalse(breaker.isBlocked)
+        XCTAssertTrue(settings.linuxDoReadTimingsEnabled)
+    }
+}
+
+final class ManualReadTimingClock: @unchecked Sendable {
+    var time: CFTimeInterval
+    init(time: CFTimeInterval) { self.time = time }
+}
+
+final class ReadTimingAlgorithmTests: XCTestCase {
+    func testRetryBackoffMatchesFluxDODelays() {
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelays, [5, 10, 20, 40])
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 0), 5)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 1), 10)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 2), 20)
+        XCTAssertEqual(ReadTimingAlgorithm.retryDelay(afterFailureCount: 3), 40)
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 403, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 429, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: nil, outcome: .failure))
+        XCTAssertTrue(ReadTimingAlgorithm.isRetryable(statusCode: 200, outcome: .cloudflareChallenge))
+    }
+
+    func testRemainingTimeFromWordCountUsesDiscourseWordsPerMinute() {
+        XCTAssertEqual(ReadTimingAlgorithm.wordsPerMinute, 500)
+        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 500), 60_000)
+        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 250), 30_000)
+        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 500, accumulatedMs: 15_000), 45_000)
+        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 100, accumulatedMs: 0), 12_000)
+    }
+
+    func testCountdownHitsZeroAtFluxDOFirstTickThreshold() {
+        // FluxDO rush-flushes an unread post after the first 1s tick.
+        XCTAssertEqual(ReadTimingAlgorithm.tickIntervalMs, 1_000)
+        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 0), 1_000)
+        XCTAssertEqual(ReadTimingAlgorithm.requiredReadTimeMs(wordCount: 8), 1_000)
+        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 0, accumulatedMs: 999), 1)
+        XCTAssertEqual(ReadTimingAlgorithm.remainingReadTimeMs(wordCount: 0, accumulatedMs: 1_000), 0)
+        XCTAssertTrue(ReadTimingAlgorithm.isRead(wordCount: 8, accumulatedMs: 1_000))
+        XCTAssertFalse(ReadTimingAlgorithm.isRead(wordCount: 500, accumulatedMs: 1_000))
+        XCTAssertTrue(ReadTimingAlgorithm.isRead(wordCount: 500, accumulatedMs: 60_000))
+    }
+
+    func testFormEncodingUsesTimingsPostNumberKeys() {
+        let query = TopicTimingsFormEncoder.queryString(
+            topicId: 42,
+            topicTime: 1500,
+            timings: [3: 800, 1: 1200]
+        )
+        XCTAssertEqual(query, "topic_id=42&topic_time=1500&timings[1]=1200&timings[3]=800")
+
+        let parameters = TopicTimingsFormEncoder.parameters(
+            topicId: 42,
+            topicTime: 1500,
+            timings: [3: 800, 1: 1200]
+        )
+        XCTAssertEqual(parameters["topic_id"] as? Int, 42)
+        XCTAssertEqual(parameters["topic_time"] as? Int, 1500)
+        XCTAssertEqual(parameters["timings[1]"] as? Int, 1200)
+        XCTAssertEqual(parameters["timings[3]"] as? Int, 800)
+        XCTAssertNil(parameters["timings"])
+    }
+
+    func testTrackerCountdownReachesZeroAtRequiredThreshold() {
+        let clock = ManualReadTimingClock(time: 100)
+        let tracker = TopicReadTracker(now: { clock.time })
+        tracker.startSession()
+        tracker.setWordCount(0, forPostNumber: 1)
+        tracker.recordVisible(postNumber: 1)
+
+        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 1_000)
+        clock.time += 0.5
+        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 500)
+        clock.time += 0.5
+        XCTAssertEqual(tracker.remainingReadTimeMs(forPostNumber: 1), 0)
+        XCTAssertTrue(tracker.isPostRead(1))
+        XCTAssertTrue(tracker.shouldRushFlush())
+        XCTAssertEqual(tracker.countdownState(forPostNumber: 1), .complete)
+
+        tracker.markServerRead(2)
+        XCTAssertEqual(tracker.countdownState(forPostNumber: 2), .hidden)
+    }
+
+    func testPostWordCountFallsBackToCookedText() throws {
+        let post = try JSONDecoder().decode(
+            DiscourseTopicDetail.Post.self,
+            from: Data("""
+            {
+              "id": 1, "username": "alice", "cooked": "<p>hello world</p>",
+              "post_number": 1, "created_at": "2026-07-01T00:00:00.000Z"
+            }
+            """.utf8)
+        )
+        XCTAssertEqual(post.wordCount, 2)
+        XCTAssertFalse(post.read)
+
+        let counted = try JSONDecoder().decode(
+            DiscourseTopicDetail.Post.self,
+            from: Data("""
+            {
+              "id": 2, "username": "bob", "cooked": "<p>ignored</p>",
+              "post_number": 2, "created_at": "2026-07-01T00:00:00.000Z",
+              "word_count": 42, "read": true
+            }
+            """.utf8)
+        )
+        XCTAssertEqual(counted.wordCount, 42)
+        XCTAssertTrue(counted.read)
     }
 }

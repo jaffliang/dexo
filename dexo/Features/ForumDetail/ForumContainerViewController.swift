@@ -13,7 +13,8 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
     private let api: DiscourseAPI
     private let authManager = AuthManager.shared
     private var notificationPoller: NotificationPoller?
-    private var hasPendingReadTimingsAutoDisabledAlert = false
+    private var hasPendingReadTimingsStatusToast = false
+    private var pendingReadTimingsStatusText: String?
     private var pendingPushDestination: PendingPushDestination?
 
     init(forum: ForumInstance) {
@@ -107,13 +108,13 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(readTimingsWereAutoDisabled),
-            name: .linuxDoReadTimingsAutoDisabled,
+            selector: #selector(readTimingsStatusDidChange(_:)),
+            name: .readTimingsStatusDidChange,
             object: api
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(presentPendingReadTimingsAlertIfPossible),
+            selector: #selector(presentPendingReadTimingsStatusIfPossible),
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
@@ -142,24 +143,66 @@ final class ForumContainerViewController: BaseViewController, AuthGating {
         openPendingPushDestinationIfPossible()
     }
 
-    @objc private func readTimingsWereAutoDisabled() {
-        hasPendingReadTimingsAutoDisabledAlert = true
-        presentPendingReadTimingsAlertIfPossible()
+    @objc private func readTimingsStatusDidChange(_ notification: Notification) {
+        guard let status = notification.userInfo?["status"] as? ReadTimingUserStatus else { return }
+        switch status {
+        case .retrying(let delay, _):
+            pendingReadTimingsStatusText = String(localized: "settings.read_timings.retrying \(Int(delay))")
+        case .failed(let summary):
+            pendingReadTimingsStatusText = String(localized: "settings.read_timings.error \(summary)")
+        case .succeeded, .idle:
+            return
+        }
+        hasPendingReadTimingsStatusToast = true
+        presentPendingReadTimingsStatusIfPossible()
     }
 
-    @objc private func presentPendingReadTimingsAlertIfPossible() {
-        guard hasPendingReadTimingsAutoDisabledAlert,
-              view.window?.windowScene?.activationState == .foregroundActive,
-              presentedViewController == nil
+    @objc private func presentPendingReadTimingsStatusIfPossible() {
+        guard hasPendingReadTimingsStatusToast,
+              let text = pendingReadTimingsStatusText,
+              view.window?.windowScene?.activationState == .foregroundActive
         else { return }
-        hasPendingReadTimingsAutoDisabledAlert = false
-        let alert = UIAlertController(
-            title: String(localized: "settings.read_timings.auto_disabled.title"),
-            message: String(localized: "settings.read_timings.auto_disabled.message"),
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: String(localized: "action.ok"), style: .default))
-        present(alert, animated: true)
+        hasPendingReadTimingsStatusToast = false
+        pendingReadTimingsStatusText = nil
+        showReadTimingsStatusToast(text)
+    }
+
+    private func showReadTimingsStatusToast(_ text: String) {
+        let container = UIView()
+        container.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        container.layer.cornerRadius = 10
+        container.layer.masksToBounds = true
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.alpha = 0
+
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.font = FontManager.shared.font(size: 14, weight: .medium)
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(label)
+        view.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            container.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            container.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.86),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+        ])
+        UIView.animate(withDuration: 0.2, animations: {
+            container.alpha = 1
+        }) { _ in
+            UIView.animate(withDuration: 0.25, delay: 2.0, options: [], animations: {
+                container.alpha = 0
+            }, completion: { _ in
+                container.removeFromSuperview()
+            })
+        }
     }
 
     private func startObservingAuth() {

@@ -83,11 +83,13 @@ final class SettingsViewController: ObservableViewController {
     }
 
     private func networkRows() -> [NetworkRow] {
-        [.dohSettings]
+        [.dohSettings, .linuxDoReadTimings, .timingReports]
     }
 
     private enum NetworkRow {
         case dohSettings
+        case linuxDoReadTimings
+        case timingReports
     }
 
     private enum SessionRow: Int, CaseIterable {
@@ -104,8 +106,6 @@ final class SettingsViewController: ObservableViewController {
         case renderPreview
         case webViewProxyTest
         case urlSessionProxyTest
-        case linuxDoReadTimings
-        case timingReports
     }
     #endif
 }
@@ -150,10 +150,13 @@ extension SettingsViewController: UITableViewDataSource {
         case .about:
             return String(localized: "settings.about.footer")
         case .network:
-            return String(localized: "settings.doh.root.footer")
+            return [
+                String(localized: "settings.doh.root.footer"),
+                String(localized: "settings.read_timings.footer"),
+            ].joined(separator: "\n\n")
         #if DEBUG
         case .debug:
-            return String(localized: "settings.read_timings.footer")
+            return nil
         #endif
         default:
             return nil
@@ -196,14 +199,14 @@ extension SettingsViewController: UITableViewDataSource {
             switch row {
             case .dohSettings:
                 return makeDoHSettingsCell(tableView, indexPath: indexPath)
-        }
-        #if DEBUG
-        case .debug:
-            switch DebugRow(rawValue: indexPath.row)! {
             case .linuxDoReadTimings:
                 return makeLinuxDoReadTimingsCell(tableView, indexPath: indexPath)
             case .timingReports:
                 return makeTimingReportsCell(tableView, indexPath: indexPath)
+        }
+        #if DEBUG
+        case .debug:
+            switch DebugRow(rawValue: indexPath.row)! {
             case .renderPreview:
                 return makeRenderPreviewCell(tableView, indexPath: indexPath)
             case .webViewProxyTest:
@@ -449,15 +452,17 @@ extension SettingsViewController: UITableViewDelegate {
                 ExternalLinkOpener.open(url, from: self)
             }
         case .network:
-            let viewController = DoHSettingsViewController()
-            navigationController?.pushViewController(viewController, animated: true)
-        #if DEBUG
-        case .debug:
-            switch DebugRow(rawValue: indexPath.row)! {
+            switch networkRows()[indexPath.row] {
+            case .dohSettings:
+                navigationController?.pushViewController(DoHSettingsViewController(), animated: true)
             case .linuxDoReadTimings:
                 break
             case .timingReports:
                 navigationController?.pushViewController(TopicTimingReportsViewController(), animated: true)
+            }
+        #if DEBUG
+        case .debug:
+            switch DebugRow(rawValue: indexPath.row)! {
             case .renderPreview:
                 showRenderPreviewInput()
             case .webViewProxyTest:
