@@ -189,6 +189,7 @@ final class ChallengeViewController: BaseViewController {
             isObservingCookieChanges = true
             if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: lease) {
                 showAttachWarning(warning)
+                return
             }
             webView.load(URLRequest(url: targetURL))
         } catch {
@@ -422,7 +423,7 @@ final class ChallengeViewController: BaseViewController {
         }
     }
 
-    private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
+    private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver, @unchecked Sendable {
         private let onNavigationFinished: () -> Void
         private let onNavigationFailed: (Error) -> Void
         private var trustEvaluator: WebViewProxyTrustEvaluator?
@@ -433,6 +434,7 @@ final class ChallengeViewController: BaseViewController {
         ) {
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
+            self.trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         }
 
         func webView(
@@ -454,11 +456,15 @@ final class ChallengeViewController: BaseViewController {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            onNavigationFinished()
+            DispatchQueue.main.async { [onNavigationFinished] in
+                onNavigationFinished()
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            onNavigationFailed(error)
+            DispatchQueue.main.async { [onNavigationFailed] in
+                onNavigationFailed(error)
+            }
         }
 
         func webView(
@@ -466,11 +472,15 @@ final class ChallengeViewController: BaseViewController {
             didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: Error
         ) {
-            onNavigationFailed(error)
+            DispatchQueue.main.async { [onNavigationFailed] in
+                onNavigationFailed(error)
+            }
         }
 
         func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
-            onNavigationFinished()
+            DispatchQueue.main.async { [onNavigationFinished] in
+                onNavigationFinished()
+            }
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,

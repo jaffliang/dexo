@@ -7,6 +7,7 @@ import WebKit
 /// `WebCookieStore.shared`.
 nonisolated enum WebViewLegacyChallengeError: Error, LocalizedError, Equatable {
     case gatewayInactive
+    case mitmCAMissing
     case schemeRegistrationUnavailable(String)
     case isolatedStoreFailed(String)
 
@@ -14,6 +15,8 @@ nonisolated enum WebViewLegacyChallengeError: Error, LocalizedError, Equatable {
         switch self {
         case .gatewayInactive:
             return "DoH gateway is not listening"
+        case .mitmCAMissing:
+            return "DoH MITM CA is not available"
         case .schemeRegistrationUnavailable(let reason):
             return reason
         case .isolatedStoreFailed(let reason):
@@ -106,6 +109,10 @@ extension WebViewDoHConfigurator {
         let gateway = DoHGatewayRuntime.shared.currentConfiguration
         guard gateway.isConnectProxyActive else {
             session.warning = WebViewLegacyChallengeError.gatewayInactive
+            return session
+        }
+        guard let ca = DoHGatewayRuntime.shared.mitmCACertificateData, !ca.isEmpty else {
+            session.warning = WebViewLegacyChallengeError.mitmCAMissing
             return session
         }
 

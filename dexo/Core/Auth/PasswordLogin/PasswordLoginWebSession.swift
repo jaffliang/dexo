@@ -217,6 +217,9 @@ final class PasswordLoginWebSession {
         // Isolated CONNECT store: forum hosts MITM+ECH, Turnstile/hCaptcha
         // stay a raw Safari TLS tunnel. Never skip DoH on iOS 17.
         challengeDoHSession = await WebViewDoHConfigurator.attachIsolatedConnectStore(wkConfig)
+        if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: challengeDoHSession) {
+            throw warning
+        }
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
         scriptBridge = bridge

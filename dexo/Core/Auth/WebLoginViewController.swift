@@ -301,7 +301,7 @@ final class WebLoginViewController: BaseViewController {
 
     // MARK: - Coordinator
 
-    private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked Sendable {
         private let targetHost: String
         private let onCookiesReady: ([HTTPCookie]) -> Void
         private let trustEvaluator: WebViewProxyTrustEvaluator?

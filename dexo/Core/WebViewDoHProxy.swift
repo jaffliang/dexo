@@ -69,9 +69,9 @@ enum WebViewDoHConfigurator {
     }
 }
 
-/// Evaluates the server-trust challenge produced by the app's loopback MITM
-/// proxy against its private CA. The host policy already attached to SecTrust
-/// is preserved, so a certificate for another hostname is still rejected.
+/// Accepts loopback MITM leaves signed by the exported Rust (or debug Swift)
+/// CA. iOS ATS / `SecTrustEvaluateWithError` often rejects homemade CAs even
+/// after they are set as anchors; our own CONNECT certs must still be used.
 nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
     private let caCertificates: [SecCertificate]
 
@@ -89,19 +89,91 @@ nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
 
     func credential(for challenge: URLAuthenticationChallenge) -> URLCredential? {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust
+              let trust = challenge.protectionSpace.serverTrust,
+              let leaf = Self.leafCertificate(from: trust)
         else {
             return nil
         }
 
-        guard SecTrustSetAnchorCertificates(trust, caCertificates as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, false) == errSecSuccess
-        else {
+        guard caCertificates.contains(where: { Self.certificate(leaf, isIssuedBy: $0) }) else {
             return nil
         }
+
+        let host = challenge.protectionSpace.host
+        if !host.isEmpty, !Self.certificate(leaf, matchesHost: host) {
+            return nil
+        }
+
+        _ = SecTrustSetAnchorCertificates(trust, caCertificates as CFArray)
+        _ = SecTrustSetAnchorCertificatesOnly(trust, true)
         var error: CFError?
-        guard SecTrustEvaluateWithError(trust, &error) else { return nil }
+        _ = SecTrustEvaluateWithError(trust, &error)
         return URLCredential(trust: trust)
+    }
+
+    static func leafCertificate(from trust: SecTrust) -> SecCertificate? {
+        (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
+    }
+
+    static func certificate(_ leaf: SecCertificate, isIssuedBy ca: SecCertificate) -> Bool {
+        if CFEqual(leaf, ca) {
+            return true
+        }
+        guard let issuer = SecCertificateCopyNormalizedIssuerSequence(leaf) as Data?,
+              let subject = SecCertificateCopyNormalizedSubjectSequence(ca) as Data?,
+              !issuer.isEmpty,
+              issuer == subject
+        else {
+            return false
+        }
+        return true
+    }
+
+    static func certificate(_ leaf: SecCertificate, matchesHost host: String) -> Bool {
+        let expected = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        guard !expected.isEmpty else { return false }
+        let names = dnsNames(in: leaf)
+        if names.isEmpty {
+            return true
+        }
+        return names.contains { nameMatches($0, host: expected) }
+    }
+
+    private static func dnsNames(in certificate: SecCertificate) -> [String] {
+        var names: [String] = []
+        if let summary = SecCertificateCopySubjectSummary(certificate) as String? {
+            let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                names.append(trimmed)
+            }
+        }
+        if let values = SecCertificateCopyValues(
+            certificate,
+            [kSecOIDSubjectAltName] as CFArray,
+            nil
+        ) as? [String: Any],
+           let san = values[kSecOIDSubjectAltName as String] as? [String: Any],
+           let entries = san[kSecPropertyKeyValue as String] as? [[String: Any]]
+        {
+            for entry in entries {
+                if let value = entry[kSecPropertyKeyValue as String] as? String, !value.isEmpty {
+                    names.append(value)
+                }
+            }
+        }
+        return names
+    }
+
+    private static func nameMatches(_ name: String, host: String) -> Bool {
+        let candidate = name.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if candidate == host {
+            return true
+        }
+        if candidate.hasPrefix("*.") {
+            let suffix = candidate.dropFirst(1)
+            return host.hasSuffix(suffix) && host != String(suffix.dropFirst())
+        }
+        return false
     }
 }
 

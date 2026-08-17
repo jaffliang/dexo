@@ -657,6 +657,22 @@
         }
       }
     },
+    "browser.load_failed.message %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The page could not be loaded.\\n%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "页面无法加载。\\n%@"
+          }
+        }
+      }
+    },
     "cache.avatars" : {
       "extractionState" : "stale",
       "localizations" : {

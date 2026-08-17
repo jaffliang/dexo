@@ -95,6 +95,17 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
         XCTAssertTrue(detail.contains("-1001") || detail.contains("\(URLError.timedOut.rawValue)"), detail)
     }
 
+    func testMitmCAMissingIsALoudAttachFailure() {
+        let error = WebViewLegacyChallengeError.mitmCAMissing
+        XCTAssertEqual(error.localizedDescription, "DoH MITM CA is not available")
+        XCTAssertNotEqual(error, .gatewayInactive)
+    }
+
+    func testTrustEvaluatorRequiresCertificateBytes() {
+        XCTAssertNil(WebViewProxyTrustEvaluator(certificateData: []))
+        XCTAssertNil(WebViewProxyTrustEvaluator(certificateData: [Data([0x00, 0x01])]))
+    }
+
     func testTunnelPolicyMatchesRustSplit() {
         XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "challenges.cloudflare.com"))
         XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "newassets.hcaptcha.com"))
