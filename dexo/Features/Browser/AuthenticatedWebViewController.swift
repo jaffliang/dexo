@@ -168,7 +168,7 @@ final class AuthenticatedWebViewController: BaseViewController {
         navigationController?.toolbar.tintColor = theme.accentColor
         navigationController?.navigationBar.tintColor = theme.accentColor
         loadErrorBanner.textColor = UIColor.secondaryLabel
-        loadErrorBanner.backgroundColor = theme.cardBackgroundColor
+        loadErrorBanner.backgroundColor = theme.backgroundColor
         webView?.backgroundColor = theme.cardBackgroundColor
         webView?.underPageBackgroundColor = theme.cardBackgroundColor
         for popup in popupWebViews {
@@ -435,6 +435,9 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
         }
     }
 
+    /// SSL hard-fails (-1200) abort the *provisional* load. Without this
+    /// hook the in-app browser stays a blank page instead of the SSL banner
+    /// ChallengeViewController already shows.
     func webView(
         _ webView: WKWebView,
         didFailProvisionalNavigation navigation: WKNavigation!,
