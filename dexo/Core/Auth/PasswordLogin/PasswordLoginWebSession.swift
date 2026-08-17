@@ -104,6 +104,7 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     /// During in-place CF interstitial, `window.open` must stay in this WebView
     /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
     var isChallengeMode = false
+    private var trustEvaluator: WebViewProxyTrustEvaluator?
 
     init(session: PasswordLoginWebSession) {
         self.session = session
@@ -148,6 +149,13 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if trustEvaluator == nil {
+            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+        }
+        if let credential = trustEvaluator?.credential(for: challenge) {
+            completionHandler(.useCredential, credential)
+            return
+        }
         completionHandler(.performDefaultHandling, nil)
     }
 
@@ -206,14 +214,9 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // iOS 17: skip CONNECT MITM so Turnstile / hCaptcha stay end-to-end.
-        // iOS 15: register http/https with WKBrowsingContextController so
-        // robots.txt + CF interstitial reuse the URLSession DoH gateway.
-        if #available(iOS 17.0, *) {
-            wkConfig.websiteDataStore.proxyConfigurations = []
-        } else {
-            challengeDoHSession = await WebViewDoHConfigurator.attachLegacyChallengeRouting(wkConfig)
-        }
+        // Isolated CONNECT store: forum hosts MITM+ECH, Turnstile/hCaptcha
+        // stay a raw Safari TLS tunnel. Never skip DoH on iOS 17.
+        challengeDoHSession = await WebViewDoHConfigurator.attachIsolatedConnectStore(wkConfig)
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
         scriptBridge = bridge
@@ -262,6 +265,10 @@ final class PasswordLoginWebSession {
 
         self.webView = webView
         self.hostController = presenter
+        await WebCookieStore.shared.primeToWebView(
+            webView.configuration.websiteDataStore,
+            for: baseURL
+        )
     }
 
     func loadCaptchaPage() async throws {

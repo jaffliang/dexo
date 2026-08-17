@@ -71,13 +71,9 @@ final class ChallengeViewController: BaseViewController {
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(darkModeCSS)
-        // Keep the shared store; replacing it with `.default()` would split
-        // TLS/JA3 from password-login fetches that reuse this jar.
-        if #available(iOS 17.0, *) {
-            let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(config)
-            return (config, lease)
-        }
-        let lease = await WebViewDoHConfigurator.attachLegacyChallengeRouting(config)
+        // Isolated CONNECT store when DoH is on. Never put a proxy on the
+        // shared cookie jar or `.default()`.
+        let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(config)
         return (config, lease)
     }
 

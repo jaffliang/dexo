@@ -9,31 +9,22 @@ import WebKit
 /// terminates local TLS, while URLSession performs upstream TLS with the app's
 /// encrypted resolver configuration.
 enum WebViewDoHConfigurator {
+    /// Production WKWebViews use an isolated store pointed at the Rust
+    /// CONNECT port. Never installs a proxy on `.default()` or the shared jar.
     static func configure(_ configuration: WKWebViewConfiguration) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-
-        let dataStore = WKWebsiteDataStore.default()
-        configuration.websiteDataStore = dataStore
-        dataStore.proxyConfigurations = []
-
-        guard AppSettings.shared.dohEnabled else { return nil }
-        let lease = try await WebViewDoHProxy.shared.acquire()
-        dataStore.proxyConfigurations = [lease.proxyConfiguration]
+        let lease = await attachIsolatedConnectStore(configuration)
+        if let warning = legacyAttachWarning(from: lease) {
+            throw warning
+        }
         return lease
     }
 
-    /// Applies the DoH CONNECT proxy to whatever data store the caller already
-    /// attached (e.g. the shared Cloudflare / password-login jar), without
-    /// replacing it with `.default()`.
+    /// Same isolated CONNECT store as `configure`. The caller store is replaced
+    /// when DoH is on so the shared cookie jar never receives a proxy.
     static func configurePreservingDataStore(
         _ configuration: WKWebViewConfiguration
     ) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-        configuration.websiteDataStore.proxyConfigurations = []
-        guard AppSettings.shared.dohEnabled else { return nil }
-        let lease = try await WebViewDoHProxy.shared.acquire()
-        configuration.websiteDataStore.proxyConfigurations = [lease.proxyConfiguration]
-        return lease
+        try await configure(configuration)
     }
 
     /// Configures the debug browser for a pure local MITM capture. This path
@@ -67,9 +58,14 @@ enum WebViewDoHConfigurator {
     }
 
     static func makeTrustEvaluator() -> WebViewProxyTrustEvaluator? {
-        guard #available(iOS 17.0, *) else { return nil }
-        guard let certificateData = WebViewDoHProxy.shared.caCertificateData else { return nil }
-        return WebViewProxyTrustEvaluator(certificateData: certificateData)
+        var certificates: [Data] = []
+        if let rustCA = DoHGatewayRuntime.shared.mitmCACertificateData, !rustCA.isEmpty {
+            certificates.append(rustCA)
+        }
+        if #available(iOS 17.0, *), let swiftCA = WebViewDoHProxy.shared.caCertificateData {
+            certificates.append(swiftCA)
+        }
+        return WebViewProxyTrustEvaluator(certificateData: certificates)
     }
 }
 
@@ -77,13 +73,18 @@ enum WebViewDoHConfigurator {
 /// proxy against its private CA. The host policy already attached to SecTrust
 /// is preserved, so a certificate for another hostname is still rejected.
 nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
-    private let caCertificate: SecCertificate
+    private let caCertificates: [SecCertificate]
 
-    init?(certificateData: Data) {
-        guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
-            return nil
+    convenience init?(certificateData: Data) {
+        self.init(certificateData: [certificateData])
+    }
+
+    init?(certificateData: [Data]) {
+        let certificates = certificateData.compactMap {
+            SecCertificateCreateWithData(nil, $0 as CFData)
         }
-        caCertificate = certificate
+        guard !certificates.isEmpty else { return nil }
+        caCertificates = certificates
     }
 
     func credential(for challenge: URLAuthenticationChallenge) -> URLCredential? {
@@ -93,7 +94,7 @@ nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
             return nil
         }
 
-        guard SecTrustSetAnchorCertificates(trust, [caCertificate] as CFArray) == errSecSuccess,
+        guard SecTrustSetAnchorCertificates(trust, caCertificates as CFArray) == errSecSuccess,
               SecTrustSetAnchorCertificatesOnly(trust, false) == errSecSuccess
         else {
             return nil

@@ -181,7 +181,10 @@ final class AuthenticatedWebViewController: BaseViewController {
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = WebCookieStore.shared.websiteDataStore
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-            let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(configuration)
+            let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(configuration)
+            if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: lease) {
+                throw warning
+            }
             guard !Task.isCancelled else { return }
 
             proxyLease = lease

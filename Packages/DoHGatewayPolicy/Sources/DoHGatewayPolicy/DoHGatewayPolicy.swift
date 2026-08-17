@@ -34,15 +34,22 @@ public enum DoHGatewayPolicy {
         public var isEnabled: Bool
         public var gatewayPort: Int
         public var dohHost: String?
+        /// Isolated WKWebView CONNECT listener. 0 when the gateway is down.
+        public var connectPort: Int
 
-        public init(isEnabled: Bool, gatewayPort: Int, dohHost: String?) {
+        public init(isEnabled: Bool, gatewayPort: Int, dohHost: String?, connectPort: Int = 0) {
             self.isEnabled = isEnabled
             self.gatewayPort = gatewayPort
             self.dohHost = dohHost
+            self.connectPort = connectPort
         }
 
         public var isProxyActive: Bool {
             isEnabled && gatewayPort > 0
+        }
+
+        public var isConnectProxyActive: Bool {
+            isEnabled && connectPort > 0
         }
     }
 

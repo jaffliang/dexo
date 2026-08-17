@@ -7,9 +7,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// string selectors so the app does not link private symbols.
 @interface WebViewDoHChallengeSPI : NSObject
 
-/// `WKBrowsingContextController` `registerSchemeForCustomProtocol:` for
-/// `http` and `https`. When this succeeds, those WKWebView requests go
-/// through the process `URLProtocol` stack (`DoHGatewayURLProtocol`).
+/// Leftover-scheme cleanup only. Production WebViews no longer register
+/// `http`/`https` for `URLProtocol` (that MITMs Turnstile).
 + (BOOL)registerHTTPAndHTTPSCustomProtocolSchemes
     NS_SWIFT_NAME(registerHTTPAndHTTPSCustomProtocolSchemes());
 + (void)unregisterHTTPAndHTTPSCustomProtocolSchemes
@@ -18,8 +17,9 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(canRegisterCustomProtocolSchemes());
 
 /// Brand-new non-persistent store whose http(s) proxy is set on
-/// `_WKWebsiteDataStoreConfiguration` only. Never call this for
-/// `WKWebsiteDataStore.default()` or the shared cookie jar.
+/// `_WKWebsiteDataStoreConfiguration` only. Point this at the Rust
+/// CONNECT port. Never call this for `WKWebsiteDataStore.default()`
+/// or the shared cookie jar.
 + (nullable WKWebsiteDataStore *)makeNonPersistentDataStoreWithHTTPProxyPort:(uint16_t)port
                                                                       error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(makeNonPersistentDataStore(httpProxyPort:));

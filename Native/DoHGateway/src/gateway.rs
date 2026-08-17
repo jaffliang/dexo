@@ -70,31 +70,37 @@ impl Gateway {
                 return Err(error);
             }
         };
-        let upstream = match upstream_target(&request) {
-            Ok(upstream) => upstream,
+        match self.execute_http(&request).await {
+            Ok(bytes) => {
+                client
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| format!("client write: {error}"))?;
+                Ok(())
+            }
             Err(error) => {
                 write_error(&mut client, 502, &error).await?;
-                return Ok(());
+                Ok(())
             }
-        };
+        }
+    }
+
+    /// One HTTP reverse-proxy exchange (DoH + ECH/visible TLS). Used by the
+    /// plaintext URLSession listener and by CONNECT MITM after local TLS.
+    pub(crate) async fn execute_http(&self, request: &ParsedRequest) -> Result<Vec<u8>, String> {
+        let upstream = upstream_target(request)?;
         if upstream.host.eq_ignore_ascii_case(self.resolver.host()) {
-            return write_error(&mut client, 502, "refusing to proxy the DoH resolver").await;
+            return Err("refusing to proxy the DoH resolver".into());
         }
 
-        let lookup = match self.resolver.lookup(&upstream.host).await {
-            Ok(lookup) => lookup,
-            Err(error) => {
-                return write_error(
-                    &mut client,
-                    502,
-                    &format!("DoH lookup {}: {error}", upstream.host),
-                )
-                .await;
-            }
-        };
+        let lookup = self
+            .resolver
+            .lookup(&upstream.host)
+            .await
+            .map_err(|error| format!("DoH lookup {}: {error}", upstream.host))?;
         let addresses = ordered_addresses(&lookup);
         if addresses.is_empty() {
-            return write_error(&mut client, 502, "DoH returned no addresses").await;
+            return Err("DoH returned no addresses".into());
         }
 
         let ech_config = lookup
@@ -117,7 +123,7 @@ impl Gateway {
             } else {
                 None
             };
-            match self.forward(&request, &upstream, addr, ech_for_ip).await {
+            match self.forward(request, &upstream, addr, ech_for_ip).await {
                 Ok(response) => {
                     eprintln!(
                         "[DoHGateway] {} {} -> {} ({}) ech={}",
@@ -127,11 +133,7 @@ impl Gateway {
                         lookup_summary(&lookup),
                         use_ech && response.1
                     );
-                    client
-                        .write_all(&response.0)
-                        .await
-                        .map_err(|error| format!("client write: {error}"))?;
-                    return Ok(());
+                    return Ok(response.0);
                 }
                 Err(error) => {
                     eprintln!(
@@ -151,12 +153,7 @@ impl Gateway {
                 }
             }
         }
-        write_error(
-            &mut client,
-            502,
-            &format_failure_report(has_ech, &lookup, &attempts),
-        )
-        .await
+        Err(format_failure_report(has_ech, &lookup, &attempts))
     }
 
     async fn forward(
@@ -239,7 +236,7 @@ fn should_try_visible_sni(ech_present: bool) -> bool {
     !ech_present
 }
 
-async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
+pub(crate) async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
     connect_tcp_within(addr, CONNECT_TIMEOUT).await
 }
 
@@ -425,10 +422,10 @@ async fn proxy_http11(
 }
 
 #[derive(Debug)]
-struct ParsedRequest {
+pub(crate) struct ParsedRequest {
     method: String,
     target: String,
-    headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -669,7 +666,7 @@ fn is_cloudflare_ipv4(ip: Ipv4Addr) -> bool {
     })
 }
 
-fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<IpAddr> {
+pub(crate) fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<IpAddr> {
     let hints = ipv4_hints(lookup);
     let mut preferred = Vec::new();
     let mut other_cf = Vec::new();
@@ -760,7 +757,10 @@ async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Resu
     Ok(())
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<ParsedRequest, String> {
+pub(crate) async fn read_http_request<S>(stream: &mut S) -> Result<ParsedRequest, String>
+where
+    S: AsyncReadExt + Unpin,
+{
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {

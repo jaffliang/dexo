@@ -1,6 +1,33 @@
 import Foundation
 import Network
 
+/// FIFO of CONNECT decisions from `HTTPConnectMITMFramer` to the tunnel.
+/// The listener queue is serial, so push/pop stay paired per connection.
+@available(iOS 17.0, *)
+enum WebViewDoHConnectDecision {
+    struct Route: Equatable {
+        let host: String
+        let port: UInt16
+        let passthrough: Bool
+    }
+
+    private static let lock = NSLock()
+    private static var queue: [Route] = []
+
+    static func push(host: String, port: UInt16, passthrough: Bool) {
+        lock.lock()
+        queue.append(Route(host: host, port: port, passthrough: passthrough))
+        lock.unlock()
+    }
+
+    static func pop() -> Route? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !queue.isEmpty else { return nil }
+        return queue.removeFirst()
+    }
+}
+
 @available(iOS 17.0, *)
 private nonisolated final class WebViewMITMRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
@@ -40,6 +67,8 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
 
     private var parser = HTTPProxyRequestParser()
     private var activeTask: URLSessionDataTask?
+    private var upstream: NWConnection?
+    private var connectResponse = Data()
     private var isStopped = false
     private var isForwarding = false
     private var receivedBytes = 0
@@ -75,6 +104,11 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
             guard let self else { return }
             switch state {
             case .ready:
+                if let route = WebViewDoHConnectDecision.pop(), route.passthrough {
+                    self.log("passthrough Safari TLS for \(route.host)")
+                    self.spliceThroughRustConnect(host: route.host, port: route.port)
+                    return
+                }
                 self.log("native TLS ready; waiting for decrypted HTTP")
                 self.receiveRequestBytes()
             case .waiting(let error):
@@ -93,6 +127,103 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
 
     func cancel() {
         queue.async { [weak self] in self?.stop() }
+    }
+
+    private func spliceThroughRustConnect(host: String, port: UInt16) {
+        let connectPort = DoHGatewayRuntime.shared.currentConfiguration.connectPort
+        guard connectPort > 0,
+              let nwPort = NWEndpoint.Port(rawValue: UInt16(truncatingIfNeeded: connectPort))
+        else {
+            sendErrorResponse(statusCode: 502, reason: "Bad Gateway")
+            return
+        }
+        let endpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        upstream = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.isStopped else { return }
+            switch state {
+            case .ready:
+                self.sendConnectPreface(host: host, port: port)
+            case .failed, .cancelled:
+                self.stop()
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func sendConnectPreface(host: String, port: UInt16) {
+        let preface = Data("CONNECT \(host):\(port) HTTP/1.1\r\nHost: \(host):\(port)\r\n\r\n".utf8)
+        upstream?.send(content: preface, completion: .contentProcessed { [weak self] error in
+            guard let self, !self.isStopped else { return }
+            if error != nil {
+                self.stop()
+                return
+            }
+            self.receiveConnectAck()
+        })
+    }
+
+    private func receiveConnectAck() {
+        upstream?.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, complete, error in
+            guard let self, !self.isStopped else { return }
+            guard error == nil else {
+                self.stop()
+                return
+            }
+            if let data {
+                self.connectResponse.append(data)
+            }
+            if let range = self.connectResponse.range(of: Data("\r\n\r\n".utf8)) {
+                let head = self.connectResponse[..<range.upperBound]
+                let leftover = self.connectResponse[range.upperBound...]
+                guard String(data: Data(head), encoding: .utf8)?.contains(" 200 ") == true else {
+                    self.log("Rust CONNECT refused passthrough")
+                    self.stop()
+                    return
+                }
+                if !leftover.isEmpty {
+                    self.client.send(content: Data(leftover), completion: .contentProcessed { _ in })
+                }
+                self.pump(from: self.client, to: self.upstream)
+                self.pump(from: self.upstream, to: self.client)
+                return
+            }
+            if complete || self.connectResponse.count > 16 * 1024 {
+                self.stop()
+            } else {
+                self.receiveConnectAck()
+            }
+        }
+    }
+
+    private func pump(from source: NWConnection?, to destination: NWConnection?) {
+        guard let source, let destination, !isStopped else { return }
+        source.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveBufferSize) { [weak self] data, _, complete, error in
+            guard let self, !self.isStopped else { return }
+            guard error == nil else {
+                self.stop()
+                return
+            }
+            if let data, !data.isEmpty {
+                destination.send(content: data, completion: .contentProcessed { [weak self] sendError in
+                    guard let self, !self.isStopped else { return }
+                    if sendError != nil || complete {
+                        self.stop()
+                    } else {
+                        self.pump(from: source, to: destination)
+                    }
+                })
+                return
+            }
+            if complete {
+                self.stop()
+            } else {
+                self.pump(from: source, to: destination)
+            }
+        }
     }
 
     private func receiveRequestBytes() {
@@ -330,6 +461,9 @@ nonisolated final class WebViewDoHMITMTunnel: @unchecked Sendable {
         activeTask?.cancel()
         activeTask = nil
         session.invalidateAndCancel()
+        upstream?.stateUpdateHandler = nil
+        upstream?.cancel()
+        upstream = nil
         client.stateUpdateHandler = nil
         client.cancel()
         log("stopping; decrypted received=\(receivedBytes), sent=\(sentBytes)")

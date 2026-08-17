@@ -14,6 +14,9 @@ final class DoHGatewayRuntimeTests: XCTestCase {
         DoHGatewayRuntime.shared.stop()
         let request = URLRequest(url: try XCTUnwrap(URL(string: "https://linux.do/latest.json")))
         XCTAssertFalse(DoHGatewayURLProtocol.canInit(with: request))
+        XCTAssertFalse(DoHGatewayRuntime.shared.currentConfiguration.isConnectProxyActive)
+        XCTAssertEqual(DoHGatewayRuntime.shared.currentConfiguration.connectPort, 0)
+        XCTAssertNil(DoHGatewayRuntime.shared.mitmCACertificateData)
     }
 
     func testBuiltInDoHServersUsePublicHTTPSEndpoints() {

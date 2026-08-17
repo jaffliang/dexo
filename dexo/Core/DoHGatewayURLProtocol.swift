@@ -1,9 +1,8 @@
 import DoHGatewayPolicy
 import Foundation
 
-/// Rewrites HTTPS URLSession requests onto the app-local HTTP gateway.
-/// WKWebView does not consult `URLProtocol` unless http/https are registered
-/// with `WKBrowsingContextController` (iOS 15 challenge / password-login).
+/// Rewrites HTTPS URLSession / Alamofire / SDWebImage requests onto the
+/// app-local HTTP gateway. WKWebView is not routed through this protocol.
 nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable {
     private static let relay = Relay()
     private var relayTask: URLSessionDataTask?

@@ -198,4 +198,27 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertEqual(materialized.value(forHTTPHeaderField: "Content-Length"), String(body.count))
         XCTAssertNil(materialized.value(forHTTPHeaderField: "Transfer-Encoding"))
     }
+
+    func testConnectPortDoesNotAffectURLSessionRewrite() throws {
+        let connectOnly = DoHGatewayPolicy.Configuration(
+            isEnabled: true,
+            gatewayPort: 0,
+            dohHost: "cloudflare-dns.com",
+            connectPort: 47822
+        )
+        XCTAssertFalse(connectOnly.isProxyActive)
+        XCTAssertTrue(connectOnly.isConnectProxyActive)
+        XCTAssertNil(DoHGatewayPolicy.rewrittenRequest(
+            URLRequest(url: try XCTUnwrap(URL(string: "https://linux.do/latest.json"))),
+            configuration: connectOnly
+        ))
+    }
+
+    func testWebViewTunnelPolicySplitsTurnstileFromForum() {
+        XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "challenges.cloudflare.com"))
+        XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "api.hcaptcha.com"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "linux.do"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "cdk.linux.do"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "cloudflare.com"))
+    }
 }

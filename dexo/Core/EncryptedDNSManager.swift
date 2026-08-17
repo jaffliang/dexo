@@ -108,6 +108,7 @@ final class EncryptedDNSManager {
         if cookieStore !== defaultStore {
             clearLeftoverWebKitHTTPProxy(on: cookieStore)
         }
+        WebViewCustomProtocolSchemes.unregisterIfNeeded()
     }
 
     private func clearLeftoverWebKitHTTPProxy(on dataStore: WKWebsiteDataStore) {
