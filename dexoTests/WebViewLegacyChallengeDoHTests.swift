@@ -17,6 +17,19 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
         XCTAssertTrue(shared !== WKWebsiteDataStore.default())
     }
 
+    func testIsolatedProxiedStoreIsNonPersistent() throws {
+        let store: WKWebsiteDataStore
+        do {
+            store = try WebViewDoHConfigurator.makeIsolatedProxiedDataStore(port: 9)
+        } catch {
+            throw XCTSkip("isolated store SPI unavailable: \(error)")
+        }
+        XCTAssertFalse(store.isPersistent, "proxied stores must not persist into CFNetwork")
+        XCTAssertTrue(store !== WKWebsiteDataStore.default())
+        XCTAssertTrue(store !== WebCookieStore.shared.websiteDataStore)
+        WKWebsiteDataStore.dexo_clearProxyConfiguration(store)
+    }
+
     func testIsolatedStoreRejectsOutOfRangePort() {
         XCTAssertThrowsError(try WebViewDoHConfigurator.makeIsolatedProxiedDataStore(port: 70_000)) { error in
             guard case .isolatedStoreFailed(let reason) = error as? WebViewLegacyChallengeError else {

@@ -1,4 +1,5 @@
 #import "WebViewDoHChallengeSPI.h"
+#import "WKWebsiteDataStore+LegacyProxyClear.h"
 
 static NSString *DexoChallengeSPILastFailure = nil;
 
@@ -143,7 +144,22 @@ static NSString *DexoChallengeSPILastFailure = nil;
         return nil;
     }
 
-    id config = [[configClass alloc] init];
+    id config = nil;
+    SEL nonPersistent = NSSelectorFromString(@"initNonPersistentConfiguration");
+    if ([configClass instancesRespondToSelector:nonPersistent]) {
+        id allocated = [configClass alloc];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        @try {
+            config = [allocated performSelector:nonPersistent];
+        } @catch (NSException *exception) {
+            config = nil;
+        }
+#pragma clang diagnostic pop
+    }
+    if (config == nil) {
+        config = [[configClass alloc] init];
+    }
     if (config == nil) {
         NSString *reason = @"_WKWebsiteDataStoreConfiguration init returned nil";
         [self recordFailure:reason];
@@ -155,10 +171,23 @@ static NSString *DexoChallengeSPILastFailure = nil;
         return nil;
     }
 
+    // `persistent` is readonly. `setValue:@NO` is a no-op on `init`.
+    // A proxied persistent store leaks into CFNetwork and times out URLSession.
+    BOOL isPersistent = NO;
     @try {
-        [config setValue:@NO forKey:@"persistent"];
+        isPersistent = [[config valueForKey:@"persistent"] boolValue];
     } @catch (NSException *exception) {
-        // Optional; identifier-less configuration is already non-persistent.
+        isPersistent = YES;
+    }
+    if (isPersistent) {
+        NSString *reason = @"refusing to proxy a persistent website data store";
+        [self recordFailure:reason];
+        if (error) {
+            *error = [NSError errorWithDomain:@"xyz.47258.dexo.webview-doh-challenge"
+                                         code:6
+                                     userInfo:@{ NSLocalizedDescriptionKey: reason }];
+        }
+        return nil;
     }
 
     NSURL *url = [self loopbackProxyURLWithPort:port];
@@ -209,24 +238,7 @@ static NSString *DexoChallengeSPILastFailure = nil;
 }
 
 + (void)clearLegacyProxyConfigurationOnDataStore:(WKWebsiteDataStore *)dataStore {
-    if (dataStore == nil) {
-        return;
-    }
-    NSArray<NSString *> *names = @[ @"_setProxyConfiguration:", @"setProxyConfiguration:" ];
-    for (NSString *name in names) {
-        SEL selector = NSSelectorFromString(name);
-        if (![dataStore respondsToSelector:selector]) {
-            continue;
-        }
-        @try {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [dataStore performSelector:selector withObject:@{}];
-#pragma clang diagnostic pop
-        } @catch (NSException *exception) {
-            continue;
-        }
-    }
+    [WKWebsiteDataStore dexo_clearProxyConfigurationOnDataStore:dataStore];
 }
 
 @end

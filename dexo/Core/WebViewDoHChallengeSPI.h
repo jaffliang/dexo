@@ -16,15 +16,15 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)canRegisterCustomProtocolSchemes
     NS_SWIFT_NAME(canRegisterCustomProtocolSchemes());
 
-/// Brand-new non-persistent store whose http(s) proxy is set on
-/// `_WKWebsiteDataStoreConfiguration` only. Point this at the Rust
-/// CONNECT port. Never call this for `WKWebsiteDataStore.default()`
-/// or the shared cookie jar.
+/// Brand-new **non-persistent** store (`initNonPersistentConfiguration`)
+/// whose http(s) proxy is set on `_WKWebsiteDataStoreConfiguration` only.
+/// Never call this for `WKWebsiteDataStore.default()` or the shared jar.
+/// Refuses to proxy a persistent configuration.
 + (nullable WKWebsiteDataStore *)makeNonPersistentDataStoreWithHTTPProxyPort:(uint16_t)port
                                                                       error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(makeNonPersistentDataStore(httpProxyPort:));
 
-/// Clear-only: `_setProxyConfiguration:` with an empty dictionary.
+/// Clear-only: `_setProxyConfiguration:` plus `httpProxy`/`httpsProxy`.
 /// Used to recover leftover process-wide proxies from older builds.
 + (void)clearLegacyProxyConfigurationOnDataStore:(WKWebsiteDataStore *)dataStore
     NS_SWIFT_NAME(clearLegacyProxyConfiguration(on:));
