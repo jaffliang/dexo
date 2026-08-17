@@ -71,8 +71,8 @@ final class ChallengeViewController: BaseViewController {
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(darkModeCSS)
-        // Isolated CONNECT store when DoH is on. Never put a proxy on the
-        // shared cookie jar or `.default()`.
+        // iOS 17+: isolated CONNECT store. iOS 15/16: shared jar, Safari TLS.
+        // Never put a proxy on the shared cookie jar or `.default()`.
         let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(config)
         return (config, lease)
     }
@@ -149,6 +149,7 @@ final class ChallengeViewController: BaseViewController {
             guard !Task.isCancelled else { return }
 
             proxyLease = lease
+            coordinator.loadProbe = WebViewDoHLoadProbe(lease: lease)
             let webView = WKWebView(frame: .zero, configuration: configuration)
             webView.navigationDelegate = coordinator
             webView.uiDelegate = coordinator
@@ -226,9 +227,8 @@ final class ChallengeViewController: BaseViewController {
 
     @MainActor
     private func seedCookies(in webView: WKWebView) async {
-        // The native MITM proxy keeps the original HTTPS URL, so WebKit still
-        // owns the real-origin cookie jar. Seed the existing login and
-        // Cloudflare state in both direct and proxied modes.
+        // iOS 15 uses the shared jar (no WebView proxy). iOS 17 uses the
+        // isolated CONNECT store after cookies are copied over.
         let cookies = WebCookieStore.shared.cookies(for: targetURL)
         let store = webView.configuration.websiteDataStore.httpCookieStore
         for cookie in cookies {
@@ -280,7 +280,7 @@ final class ChallengeViewController: BaseViewController {
         }
         attachErrorBanner.text = String(
             format: String(localized: "challenge.load_failed.message %@"),
-            WebViewChallengeDoHDiagnostics.detail(for: error)
+            WebViewChallengeDoHDiagnostics.detail(for: error, probe: coordinator.loadProbe)
         )
         attachErrorBanner.isHidden = false
         view.bringSubviewToFront(attachErrorBanner)
@@ -427,6 +427,7 @@ final class ChallengeViewController: BaseViewController {
         private let onNavigationFinished: () -> Void
         private let onNavigationFailed: (Error) -> Void
         private var trustEvaluator: WebViewProxyTrustEvaluator?
+        var loadProbe: WebViewDoHLoadProbe?
 
         init(
             onNavigationFinished: @escaping () -> Void,
@@ -442,6 +443,9 @@ final class ChallengeViewController: BaseViewController {
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
+            if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+                loadProbe?.markDidReceiveServerTrust()
+            }
             if trustEvaluator == nil {
                 trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
             }

@@ -37,6 +37,7 @@ final class WebLoginViewController: BaseViewController {
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(darkModeCSS)
+        // iOS 17+ isolated CONNECT. iOS 15/16 is a no-op (Safari TLS).
         let lease = try await WebViewDoHConfigurator.configure(config)
         return (config, lease)
     }

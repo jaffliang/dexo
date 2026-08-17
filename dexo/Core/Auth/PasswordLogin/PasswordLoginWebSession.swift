@@ -104,6 +104,7 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     /// During in-place CF interstitial, `window.open` must stay in this WebView
     /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
     var isChallengeMode = false
+    var loadProbe: WebViewDoHLoadProbe?
     private var trustEvaluator: WebViewProxyTrustEvaluator?
 
     init(session: PasswordLoginWebSession) {
@@ -149,6 +150,9 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            loadProbe?.markDidReceiveServerTrust()
+        }
         if trustEvaluator == nil {
             trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         }
@@ -214,8 +218,8 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // Isolated CONNECT store: forum hosts MITM+ECH, Turnstile/hCaptcha
-        // stay a raw Safari TLS tunnel. Never skip DoH on iOS 17.
+        // iOS 17+: isolated CONNECT (forum MITM+ECH, Turnstile/hCaptcha E2E).
+        // iOS 15/16: shared jar, Safari TLS. URLSession still uses DoH+ECH.
         challengeDoHSession = await WebViewDoHConfigurator.attachIsolatedConnectStore(wkConfig)
         if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: challengeDoHSession) {
             throw warning
@@ -240,6 +244,7 @@ final class PasswordLoginWebSession {
         ))
 
         let webDelegate = PasswordLoginWebViewDelegateBridge(session: self)
+        webDelegate.loadProbe = WebViewDoHLoadProbe(lease: challengeDoHSession)
         self.webDelegate = webDelegate
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
@@ -655,12 +660,13 @@ final class PasswordLoginWebSession {
         }
         originTimeoutTask?.cancel()
         originTimeoutTask = nil
+        let body = WebViewChallengeDoHDiagnostics.detail(for: error, probe: webDelegate?.loadProbe)
         if navigationContinuation != nil {
             takeNavigationContinuation()?.resume(
                 throwing: PasswordLoginError.unexpected(
                     status: 0,
                     phase: "origin",
-                    body: error.localizedDescription
+                    body: body
                 )
             )
             return
@@ -670,7 +676,7 @@ final class PasswordLoginWebSession {
             throwing: PasswordLoginError.unexpected(
                 status: 0,
                 phase: "cloudflare",
-                body: error.localizedDescription
+                body: body
             )
         )
     }

@@ -57,7 +57,27 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
         XCTAssertNil(WebViewDoHConfigurator.legacyAttachWarning(from: lease))
     }
 
+    func testAttachIsolatedStoreIsNoOpBeforeiOS17() async throws {
+        guard #unavailable(iOS 17.0) else {
+            throw XCTSkip("iOS 17+ attaches CONNECT")
+        }
+        let previous = AppSettings.shared.dohEnabled
+        AppSettings.shared.dohEnabled = true
+        defer { AppSettings.shared.dohEnabled = previous }
+
+        XCTAssertFalse(WebViewDoHConfigurator.attachesWebViewConnectProxy)
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = WebCookieStore.shared.websiteDataStore
+        let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(configuration)
+        XCTAssertNil(lease)
+        XCTAssertTrue(configuration.websiteDataStore === WebCookieStore.shared.websiteDataStore)
+        XCTAssertNil(WebViewDoHConfigurator.legacyAttachWarning(from: lease))
+    }
+
     func testGatewayInactiveWarningKeepsSharedStore() async throws {
+        guard #available(iOS 17.0, *) else {
+            throw XCTSkip("CONNECT attach is iOS 17+ only")
+        }
         let previous = AppSettings.shared.dohEnabled
         AppSettings.shared.dohEnabled = true
         defer { AppSettings.shared.dohEnabled = previous }
@@ -66,6 +86,7 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
             throw XCTSkip("gateway is already listening in this process")
         }
 
+        XCTAssertTrue(WebViewDoHConfigurator.attachesWebViewConnectProxy)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WebCookieStore.shared.websiteDataStore
         let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(configuration)
@@ -93,6 +114,23 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
         let detail = WebViewChallengeDoHDiagnostics.detail(for: error)
         XCTAssertTrue(detail.contains(NSURLErrorDomain), detail)
         XCTAssertTrue(detail.contains("-1001") || detail.contains("\(URLError.timedOut.rawValue)"), detail)
+    }
+
+    func testSecureConnectionDetailIncludesProxyProbe() {
+        let probe = WebViewDoHLoadProbe(proxyAttached: false, connectPort: 18_443)
+        let error = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorSecureConnectionFailed,
+            userInfo: [NSLocalizedDescriptionKey: "ssl"]
+        )
+        XCTAssertTrue(WebViewChallengeDoHDiagnostics.isSecureConnectionFailure(error))
+        let detail = WebViewChallengeDoHDiagnostics.detail(for: error, probe: probe)
+        XCTAssertTrue(detail.contains("proxy=off"), detail)
+        XCTAssertTrue(detail.contains("connectPort=18443"), detail)
+        XCTAssertTrue(detail.contains("didReceive=no"), detail)
+        probe.markDidReceiveServerTrust()
+        let after = WebViewChallengeDoHDiagnostics.detail(for: error, probe: probe)
+        XCTAssertTrue(after.contains("didReceive=yes"), after)
     }
 
     func testMitmCAMissingIsALoudAttachFailure() {

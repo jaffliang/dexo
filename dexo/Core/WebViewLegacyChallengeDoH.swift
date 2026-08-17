@@ -26,12 +26,66 @@ nonisolated enum WebViewLegacyChallengeError: Error, LocalizedError, Equatable {
 }
 
 nonisolated enum WebViewChallengeDoHDiagnostics {
-    static func detail(for error: Error) -> String {
+    static func detail(for error: Error, probe: WebViewDoHLoadProbe? = nil) -> String {
+        let base: String
         if let challenge = error as? WebViewLegacyChallengeError {
-            return challenge.localizedDescription
+            base = challenge.localizedDescription
+        } else {
+            let nsError = error as NSError
+            base = "\(nsError.domain) (\(nsError.code)): \(error.localizedDescription)"
         }
+        guard let probe, isSecureConnectionFailure(error) else { return base }
+        return "\(base)\n\(probe.summary)"
+    }
+
+    static func isSecureConnectionFailure(_ error: Error) -> Bool {
         let nsError = error as NSError
-        return "\(nsError.domain) (\(nsError.code)): \(error.localizedDescription)"
+        return nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorSecureConnectionFailed
+    }
+}
+
+/// Snapshot for -1200 banners: whether CONNECT was attached, the Rust
+/// CONNECT port, and whether `didReceive` ran before the Network process
+/// rejected the leaf.
+nonisolated final class WebViewDoHLoadProbe: @unchecked Sendable {
+    let proxyAttached: Bool
+    let connectPort: Int
+    private let lock = NSLock()
+    private var receivedServerTrust = false
+
+    init(proxyAttached: Bool, connectPort: Int) {
+        self.proxyAttached = proxyAttached
+        self.connectPort = connectPort
+    }
+
+    convenience init(lease: AnyObject?) {
+        if let session = lease as? WebViewLegacyChallengeSession {
+            self.init(proxyAttached: session.proxyAttached, connectPort: session.connectPort)
+        } else {
+            self.init(
+                proxyAttached: false,
+                connectPort: DoHGatewayRuntime.shared.currentConfiguration.connectPort
+            )
+        }
+    }
+
+    func markDidReceiveServerTrust() {
+        lock.lock()
+        receivedServerTrust = true
+        lock.unlock()
+    }
+
+    var didReceiveServerTrust: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedServerTrust
+    }
+
+    var summary: String {
+        let proxy = proxyAttached ? "on" : "off"
+        let received = didReceiveServerTrust ? "yes" : "no"
+        return "proxy=\(proxy) connectPort=\(connectPort) didReceive=\(received)"
     }
 }
 
@@ -84,6 +138,8 @@ nonisolated enum WebViewCustomProtocolSchemes {
 /// CONNECT store. Does not retain process-wide scheme registration.
 final class WebViewLegacyChallengeSession: @unchecked Sendable {
     fileprivate(set) var warning: Error?
+    fileprivate(set) var proxyAttached = false
+    fileprivate(set) var connectPort = 0
 
     func release() {}
 }
@@ -98,15 +154,29 @@ enum WebViewLegacyProxyRecovery {
 }
 
 extension WebViewDoHConfigurator {
+    /// Public `ProxyConfiguration(httpCONNECTProxy:)` exists only on iOS 17+.
+    /// Below that, homemade MITM leaves can -1200 before `didReceive`.
+    static var attachesWebViewConnectProxy: Bool {
+        if #available(iOS 17.0, *) { return true }
+        return false
+    }
+
     /// Isolated WKWebsiteDataStore pointed at the Rust CONNECT port.
     /// Never mutates `.default()` or `WebCookieStore.shared` in place.
+    ///
+    /// iOS 15/16: no-op. Fluxdo also skips WebView proxy below iOS 17;
+    /// the Network process can reject a homemade leaf with -1200 before
+    /// `didReceive`. Callers keep the shared cookie jar and Safari TLS.
+    /// URLSession / Alamofire DoH+ECH is unchanged.
     static func attachIsolatedConnectStore(
         _ configuration: WKWebViewConfiguration
     ) async -> AnyObject? {
         guard AppSettings.shared.dohEnabled else { return nil }
+        guard #available(iOS 17.0, *) else { return nil }
 
         let session = WebViewLegacyChallengeSession()
         let gateway = DoHGatewayRuntime.shared.currentConfiguration
+        session.connectPort = gateway.connectPort
         guard gateway.isConnectProxyActive else {
             session.warning = WebViewLegacyChallengeError.gatewayInactive
             return session
@@ -126,6 +196,7 @@ extension WebViewDoHConfigurator {
             }
             configuration.websiteDataStore = store
             session.warning = nil
+            session.proxyAttached = true
             return session
         } catch {
             session.warning = error
@@ -134,8 +205,7 @@ extension WebViewDoHConfigurator {
         }
     }
 
-    /// iOS 15/16 production WebViews use the isolated CONNECT store, not
-    /// `registerSchemeForCustomProtocol`.
+    /// Same as `attachIsolatedConnectStore` (iOS 17+ CONNECT, iOS 15/16 skip).
     static func attachLegacyChallengeRouting(
         _ configuration: WKWebViewConfiguration
     ) async -> AnyObject? {

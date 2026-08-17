@@ -12,6 +12,7 @@ final class AuthenticatedWebViewController: BaseViewController {
     private var setupTask: Task<Void, Never>?
     private var progressObservation: NSKeyValueObservation?
     private var coordinator: Coordinator?
+    private var loadProbe: WebViewDoHLoadProbe?
     /// Canonical URLs already loaded by a `/login` bypass, to stop OAuth loops.
     fileprivate var bypassedLoginLoads: Set<String> = []
 
@@ -204,7 +205,9 @@ final class AuthenticatedWebViewController: BaseViewController {
             guard !Task.isCancelled else { return }
 
             proxyLease = lease
-            let coordinator = Coordinator(owner: self)
+            let probe = WebViewDoHLoadProbe(lease: lease)
+            loadProbe = probe
+            let coordinator = Coordinator(owner: self, loadProbe: probe)
             self.coordinator = coordinator
 
             let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -304,7 +307,7 @@ final class AuthenticatedWebViewController: BaseViewController {
         }
         loadErrorBanner.text = String(
             format: String(localized: "browser.load_failed.message %@"),
-            WebViewChallengeDoHDiagnostics.detail(for: error)
+            WebViewChallengeDoHDiagnostics.detail(for: error, probe: loadProbe)
         )
         loadErrorBanner.isHidden = false
         view.bringSubviewToFront(loadErrorBanner)
@@ -404,9 +407,11 @@ private extension String {
 private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked Sendable {
     weak var owner: AuthenticatedWebViewController?
     private let trustEvaluator: WebViewProxyTrustEvaluator?
+    private let loadProbe: WebViewDoHLoadProbe
 
-    init(owner: AuthenticatedWebViewController) {
+    init(owner: AuthenticatedWebViewController, loadProbe: WebViewDoHLoadProbe) {
         self.owner = owner
+        self.loadProbe = loadProbe
         trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         super.init()
     }
@@ -416,6 +421,9 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            loadProbe.markDidReceiveServerTrust()
+        }
         if let credential = trustEvaluator?.credential(for: challenge) {
             completionHandler(.useCredential, credential)
             return

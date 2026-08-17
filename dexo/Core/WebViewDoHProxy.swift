@@ -3,14 +3,15 @@ import Network
 import Security
 import WebKit
 
-/// Applies the app's global DoH preference to every production WKWebView on
-/// iOS 17 and later, regardless of the forum host. WebKit keeps the original
-/// HTTPS URL and connects through a loopback CONNECT proxy. The proxy
-/// terminates local TLS, while URLSession performs upstream TLS with the app's
-/// encrypted resolver configuration.
+/// Applies the app's global DoH preference to production WKWebViews on
+/// iOS 17 and later. WebKit keeps the original HTTPS URL and connects
+/// through a loopback CONNECT proxy. iOS 15/16 WebViews stay on Safari TLS
+/// (no CONNECT / MITM). URLSession still uses the DoH+ECH gateway on every
+/// iOS version.
 enum WebViewDoHConfigurator {
-    /// Production WKWebViews use an isolated store pointed at the Rust
-    /// CONNECT port. Never installs a proxy on `.default()` or the shared jar.
+    /// iOS 17+: isolated store pointed at the Rust CONNECT port.
+    /// iOS 15/16: no-op (no warning). Never installs a proxy on `.default()`
+    /// or the shared jar.
     static func configure(_ configuration: WKWebViewConfiguration) async throws -> AnyObject? {
         let lease = await attachIsolatedConnectStore(configuration)
         if let warning = legacyAttachWarning(from: lease) {
@@ -19,8 +20,9 @@ enum WebViewDoHConfigurator {
         return lease
     }
 
-    /// Same isolated CONNECT store as `configure`. The caller store is replaced
-    /// when DoH is on so the shared cookie jar never receives a proxy.
+    /// Same as `configure`. iOS 17+ replaces the caller store with an isolated
+    /// CONNECT store so the shared jar never receives a proxy. iOS 15/16 is a
+    /// no-op.
     static func configurePreservingDataStore(
         _ configuration: WKWebViewConfiguration
     ) async throws -> AnyObject? {

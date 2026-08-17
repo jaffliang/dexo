@@ -3,8 +3,8 @@ import Foundation
 /// Discourse password login over URLSession so csrf / hCaptcha create /
 /// `POST /session.json` use the iOS 15 DoH loopback gateway.
 ///
-/// WKWebView: iOS 17 skips CONNECT MITM (Turnstile / hCaptcha stay
-/// end-to-end). iOS 15 reuses the URLSession DoH gateway via custom schemes.
+/// WKWebView: iOS 17 uses isolated CONNECT (Turnstile / hCaptcha stay
+/// end-to-end). iOS 15/16 WebViews use Safari TLS (no CONNECT / MITM).
 enum PasswordLoginAPIClient {
     private static let requestTimeout: TimeInterval = 30
 
