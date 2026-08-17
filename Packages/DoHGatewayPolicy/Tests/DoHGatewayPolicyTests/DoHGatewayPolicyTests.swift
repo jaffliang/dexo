@@ -117,6 +117,17 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertFalse(DoHGatewayPolicy.enablePrivacyContextWhileGatewayActive)
     }
 
+    func testDirectConnectionProxyDisablesHTTPHTTPSAndSOCKS() {
+        let configuration = URLSessionConfiguration.ephemeral
+        XCTAssertFalse(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
+        let dictionary = configuration.connectionProxyDictionary ?? [:]
+        XCTAssertEqual((dictionary["HTTPEnable"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual((dictionary["HTTPSEnable"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual((dictionary["SOCKSEnable"] as? NSNumber)?.intValue, 0)
+    }
+
     func testRedirectLocationStaysOnOriginalHTTPSHost() throws {
         let location = try XCTUnwrap(URL(string: "https://linux.do/session/csrf"))
         XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(location, configuration: active))
@@ -131,6 +142,7 @@ final class DoHGatewayPolicyTests: XCTestCase {
         redirected.setValue("linux.do", forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader)
         redirected.setValue("443", forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader)
         redirected.setValue("https", forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader)
+        redirected.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader)
         redirected.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let next = DoHGatewayPolicy.requestForOuterRedirect(redirected)
@@ -139,6 +151,7 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamHostHeader))
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamPortHeader))
         XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.upstreamSchemeHeader))
+        XCTAssertNil(next.value(forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader))
         XCTAssertEqual(next.value(forHTTPHeaderField: "Accept"), "application/json")
         XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(next, configuration: active))
     }
@@ -195,5 +208,28 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertEqual(materialized.httpBody, body)
         XCTAssertEqual(materialized.value(forHTTPHeaderField: "Content-Length"), String(body.count))
         XCTAssertNil(materialized.value(forHTTPHeaderField: "Transfer-Encoding"))
+    }
+
+    func testConnectPortDoesNotAffectURLSessionRewrite() throws {
+        let connectOnly = DoHGatewayPolicy.Configuration(
+            isEnabled: true,
+            gatewayPort: 0,
+            dohHost: "cloudflare-dns.com",
+            connectPort: 47822
+        )
+        XCTAssertFalse(connectOnly.isProxyActive)
+        XCTAssertTrue(connectOnly.isConnectProxyActive)
+        XCTAssertNil(DoHGatewayPolicy.rewrittenRequest(
+            URLRequest(url: try XCTUnwrap(URL(string: "https://linux.do/latest.json"))),
+            configuration: connectOnly
+        ))
+    }
+
+    func testWebViewTunnelPolicySplitsTurnstileFromForum() {
+        XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "challenges.cloudflare.com"))
+        XCTAssertTrue(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "api.hcaptcha.com"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "linux.do"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "cdk.linux.do"))
+        XCTAssertFalse(WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: "cloudflare.com"))
     }
 }

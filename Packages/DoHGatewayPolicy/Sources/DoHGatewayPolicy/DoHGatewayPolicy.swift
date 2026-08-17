@@ -16,11 +16,52 @@ public enum DoHGatewayPolicy {
     public static let upstreamHostHeader = "X-Dexo-Gateway-Host"
     public static let upstreamPortHeader = "X-Dexo-Gateway-Port"
     public static let upstreamSchemeHeader = "X-Dexo-Gateway-Scheme"
+    /// Challenge WKWebView only. Tells the loopback gateway to pass through
+    /// Cloudflare interstitial HTML instead of turning it into a JSON 502.
+    public static let passHTMLHeader = "X-Dexo-Pass-HTML"
 
     /// Inner `URLProtocol` relay must return 3xx to the client. Following
     /// `Location: https://…` on a session with `protocolClasses = []` does
     /// visible-SNI TLS and surfaces `URLError.secureConnectionFailed`.
     public static let relayFollowsHTTPRedirects = false
+
+    /// Forces URLSession to ignore process-wide HTTP/HTTPS/SOCKS/PAC proxies.
+    /// Overlay installs can keep a leftover CONNECT proxy in CFNetwork after
+    /// `_setHTTPProxy:` leaked; loopback gateway hops must stay direct.
+    public static var directConnectionProxyDictionary: [AnyHashable: Any] {
+        var dictionary: [AnyHashable: Any] = [
+            "HTTPEnable": 0,
+            "HTTPSEnable": 0,
+            "SOCKSEnable": 0,
+            "ProxyAutoConfigEnable": 0,
+        ]
+        #if canImport(CFNetwork)
+        dictionary[kCFNetworkProxiesHTTPEnable] = 0
+        dictionary[kCFNetworkProxiesProxyAutoConfigEnable] = 0
+        #endif
+        return dictionary
+    }
+
+    public static func applyDirectConnectionProxy(_ configuration: URLSessionConfiguration) {
+        configuration.connectionProxyDictionary = directConnectionProxyDictionary
+    }
+
+    public static func disablesConnectionProxies(_ dictionary: [AnyHashable: Any]?) -> Bool {
+        guard let dictionary else { return false }
+        return isProxyDisabled(dictionary["HTTPEnable"])
+            && isProxyDisabled(dictionary["HTTPSEnable"])
+            && isProxyDisabled(dictionary["SOCKSEnable"])
+    }
+
+    private static func isProxyDisabled(_ value: Any?) -> Bool {
+        if let number = value as? NSNumber {
+            return number.intValue == 0
+        }
+        if let flag = value as? Bool {
+            return flag == false
+        }
+        return false
+    }
 
     /// `NWParameters.PrivacyContext` is encrypted DNS only (visible SNI).
     /// On iOS 15 the loopback gateway is the only ECH path — keep this off
@@ -31,15 +72,22 @@ public enum DoHGatewayPolicy {
         public var isEnabled: Bool
         public var gatewayPort: Int
         public var dohHost: String?
+        /// Isolated WKWebView CONNECT listener. 0 when the gateway is down.
+        public var connectPort: Int
 
-        public init(isEnabled: Bool, gatewayPort: Int, dohHost: String?) {
+        public init(isEnabled: Bool, gatewayPort: Int, dohHost: String?, connectPort: Int = 0) {
             self.isEnabled = isEnabled
             self.gatewayPort = gatewayPort
             self.dohHost = dohHost
+            self.connectPort = connectPort
         }
 
         public var isProxyActive: Bool {
             isEnabled && gatewayPort > 0
+        }
+
+        public var isConnectProxyActive: Bool {
+            isEnabled && connectPort > 0
         }
     }
 
@@ -189,6 +237,7 @@ public enum DoHGatewayPolicy {
         request.setValue(nil, forHTTPHeaderField: upstreamHostHeader)
         request.setValue(nil, forHTTPHeaderField: upstreamPortHeader)
         request.setValue(nil, forHTTPHeaderField: upstreamSchemeHeader)
+        request.setValue(nil, forHTTPHeaderField: passHTMLHeader)
         return request
     }
 

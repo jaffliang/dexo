@@ -3,37 +3,30 @@ import Network
 import Security
 import WebKit
 
-/// Applies the app's global DoH preference to every production WKWebView on
-/// iOS 17 and later, regardless of the forum host. WebKit keeps the original
-/// HTTPS URL and connects through a loopback CONNECT proxy. The proxy
-/// terminates local TLS, while URLSession performs upstream TLS with the app's
-/// encrypted resolver configuration.
+/// Applies the app's global DoH preference to production WKWebViews on
+/// iOS 17 and later. WebKit keeps the original HTTPS URL and connects
+/// through a loopback CONNECT proxy. iOS 15/16 WebViews stay on Safari TLS
+/// (no CONNECT / MITM). URLSession still uses the DoH+ECH gateway on every
+/// iOS version.
 enum WebViewDoHConfigurator {
+    /// iOS 17+: isolated store pointed at the Rust CONNECT port.
+    /// iOS 15/16: no-op (no warning). Never installs a proxy on `.default()`
+    /// or the shared jar.
     static func configure(_ configuration: WKWebViewConfiguration) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-
-        let dataStore = WKWebsiteDataStore.default()
-        configuration.websiteDataStore = dataStore
-        dataStore.proxyConfigurations = []
-
-        guard AppSettings.shared.dohEnabled else { return nil }
-        let lease = try await WebViewDoHProxy.shared.acquire()
-        dataStore.proxyConfigurations = [lease.proxyConfiguration]
+        let lease = await attachIsolatedConnectStore(configuration)
+        if let warning = legacyAttachWarning(from: lease) {
+            throw warning
+        }
         return lease
     }
 
-    /// Applies the DoH CONNECT proxy to whatever data store the caller already
-    /// attached (e.g. the shared Cloudflare / password-login jar), without
-    /// replacing it with `.default()`.
+    /// Same as `configure`. iOS 17+ replaces the caller store with an isolated
+    /// CONNECT store so the shared jar never receives a proxy. iOS 15/16 is a
+    /// no-op.
     static func configurePreservingDataStore(
         _ configuration: WKWebViewConfiguration
     ) async throws -> AnyObject? {
-        guard #available(iOS 17.0, *) else { return nil }
-        configuration.websiteDataStore.proxyConfigurations = []
-        guard AppSettings.shared.dohEnabled else { return nil }
-        let lease = try await WebViewDoHProxy.shared.acquire()
-        configuration.websiteDataStore.proxyConfigurations = [lease.proxyConfiguration]
-        return lease
+        try await configure(configuration)
     }
 
     /// Configures the debug browser for a pure local MITM capture. This path
@@ -67,40 +60,104 @@ enum WebViewDoHConfigurator {
     }
 
     static func makeTrustEvaluator() -> WebViewProxyTrustEvaluator? {
-        guard #available(iOS 17.0, *) else { return nil }
-        guard let certificateData = WebViewDoHProxy.shared.caCertificateData else { return nil }
-        return WebViewProxyTrustEvaluator(certificateData: certificateData)
+        var certificates: [Data] = []
+        if let rustCA = DoHGatewayRuntime.shared.mitmCACertificateData, !rustCA.isEmpty {
+            certificates.append(rustCA)
+        }
+        if #available(iOS 17.0, *), let swiftCA = WebViewDoHProxy.shared.caCertificateData {
+            certificates.append(swiftCA)
+        }
+        return WebViewProxyTrustEvaluator(certificateData: certificates)
     }
 }
 
-/// Evaluates the server-trust challenge produced by the app's loopback MITM
-/// proxy against its private CA. The host policy already attached to SecTrust
-/// is preserved, so a certificate for another hostname is still rejected.
+/// Accepts loopback MITM leaves signed by the exported Rust (or debug Swift)
+/// CA. iOS ATS / `SecTrustEvaluateWithError` often rejects homemade CAs even
+/// after they are set as anchors; our own CONNECT certs must still be used.
 nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
-    private let caCertificate: SecCertificate
+    private let caCertificates: [SecCertificate]
 
-    init?(certificateData: Data) {
-        guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
-            return nil
+    convenience init?(certificateData: Data) {
+        self.init(certificateData: [certificateData])
+    }
+
+    init?(certificateData: [Data]) {
+        let certificates = certificateData.compactMap {
+            SecCertificateCreateWithData(nil, $0 as CFData)
         }
-        caCertificate = certificate
+        guard !certificates.isEmpty else { return nil }
+        caCertificates = certificates
     }
 
     func credential(for challenge: URLAuthenticationChallenge) -> URLCredential? {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust
+              let trust = challenge.protectionSpace.serverTrust,
+              let leaf = Self.leafCertificate(from: trust)
         else {
             return nil
         }
 
-        guard SecTrustSetAnchorCertificates(trust, [caCertificate] as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, false) == errSecSuccess
-        else {
+        guard caCertificates.contains(where: { Self.certificate(leaf, isIssuedBy: $0) }) else {
             return nil
         }
+
+        let host = challenge.protectionSpace.host
+        if !host.isEmpty, !Self.certificate(leaf, matchesHost: host) {
+            return nil
+        }
+
+        _ = SecTrustSetAnchorCertificates(trust, caCertificates as CFArray)
+        _ = SecTrustSetAnchorCertificatesOnly(trust, true)
         var error: CFError?
-        guard SecTrustEvaluateWithError(trust, &error) else { return nil }
+        _ = SecTrustEvaluateWithError(trust, &error)
         return URLCredential(trust: trust)
+    }
+
+    static func leafCertificate(from trust: SecTrust) -> SecCertificate? {
+        (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
+    }
+
+    static func certificate(_ leaf: SecCertificate, isIssuedBy ca: SecCertificate) -> Bool {
+        if CFEqual(leaf, ca) {
+            return true
+        }
+        guard let issuer = SecCertificateCopyNormalizedIssuerSequence(leaf) as Data?,
+              let subject = SecCertificateCopyNormalizedSubjectSequence(ca) as Data?,
+              !issuer.isEmpty,
+              issuer == subject
+        else {
+            return false
+        }
+        return true
+    }
+
+    static func certificate(_ leaf: SecCertificate, matchesHost host: String) -> Bool {
+        let expected = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        guard !expected.isEmpty else { return false }
+        if let summary = SecCertificateCopySubjectSummary(leaf) as String?,
+           nameMatches(summary, host: expected)
+        {
+            return true
+        }
+        // iOS has no SecCertificateCopyValues. The MITM leaf embeds the
+        // CONNECT host as CN/SAN ASCII in the DER.
+        let der = SecCertificateCopyData(leaf) as Data
+        if der.range(of: Data(expected.utf8)) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func nameMatches(_ name: String, host: String) -> Bool {
+        let candidate = name.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if candidate == host {
+            return true
+        }
+        if candidate.hasPrefix("*.") {
+            let suffix = candidate.dropFirst(1)
+            return host.hasSuffix(suffix) && host != String(suffix.dropFirst())
+        }
+        return false
     }
 }
 

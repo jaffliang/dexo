@@ -41,6 +41,12 @@ final class EncryptedDNSManagerTests: XCTestCase {
         EncryptedDNSManager.shared.clearLeftoverWebKitHTTPProxies()
         WKWebsiteDataStore.dexo_clearProxyConfiguration(defaultStore)
         WKWebsiteDataStore.dexo_clearProxyConfiguration(cookieStore)
+        WebViewDoHChallengeSPI.clearLegacyProxyConfiguration(on: defaultStore)
+        WebViewDoHChallengeSPI.clearLegacyProxyConfiguration(on: cookieStore)
+        if #available(iOS 17.0, *) {
+            XCTAssertTrue(defaultStore.proxyConfigurations.isEmpty)
+            XCTAssertTrue(cookieStore.proxyConfigurations.isEmpty)
+        }
     }
 
     func testApplyAsyncInvalidURLCompletesWithoutHanging() {

@@ -91,11 +91,22 @@ pub fn status_and_decoded_body(message: &[u8]) -> Result<(u16, Vec<u8>), String>
     Ok((decoded.status, decoded.body))
 }
 
-/// Unchunk, gunzip/inflate if needed, and refuse Cloudflare HTML so the iOS
-/// client never JSON-decodes an interstitial or compressed bytes.
-pub fn process_upstream_response(message: &[u8], alpn: &str) -> Result<Vec<u8>, String> {
+/// Unchunk, gunzip/inflate if needed, and refuse Cloudflare HTML so API
+/// clients never JSON-decode an interstitial. Document / WebView requests
+/// (`pass_html_challenge`) keep the original 403 HTML.
+pub fn process_upstream_response(
+    message: &[u8],
+    alpn: &str,
+    pass_html_challenge: bool,
+) -> Result<Vec<u8>, String> {
     let decoded = decode_response(message)?;
-    process_upstream_parts(decoded.status, &decoded.headers, decoded.body, alpn)
+    process_upstream_parts(
+        decoded.status,
+        &decoded.headers,
+        decoded.body,
+        alpn,
+        pass_html_challenge,
+    )
 }
 
 pub fn process_upstream_parts(
@@ -103,6 +114,7 @@ pub fn process_upstream_parts(
     headers: &[(String, String)],
     mut body: Vec<u8>,
     alpn: &str,
+    pass_html_challenge: bool,
 ) -> Result<Vec<u8>, String> {
     let encoding = header_value(headers, "content-encoding")
         .map(str::trim)
@@ -110,8 +122,10 @@ pub fn process_upstream_parts(
     if let Some(encoding) = encoding {
         body = decode_content_encoding(encoding, body)?;
     }
-    if let Some(reason) = html_challenge_reason(headers, &body, status, alpn) {
-        return Err(reason);
+    if !pass_html_challenge {
+        if let Some(reason) = html_challenge_reason(headers, &body, status, alpn) {
+            return Err(reason);
+        }
     }
     let reason = if (200..300).contains(&status) {
         "OK"
@@ -502,7 +516,7 @@ mod tests {
     #[test]
     fn html_body_is_not_forwarded() {
         let response = b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: 19\r\n\r\n<!DOCTYPE html>nope";
-        let error = process_upstream_response(response, "http/1.1").unwrap_err();
+        let error = process_upstream_response(response, "http/1.1", false).unwrap_err();
         assert_eq!(
             error,
             "Cloudflare HTML 403 alpn=http/1.1 title=<!DOCTYPE html>nope"
@@ -519,15 +533,47 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(body);
-        let error = process_upstream_response(&response, "h2").unwrap_err();
+        let error = process_upstream_response(&response, "h2", false).unwrap_err();
         assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title=Just a moment...");
         assert!(!error.contains('\n'));
     }
 
     #[test]
+    fn html_challenge_is_passed_through_for_browser_accept() {
+        let body = b"<html><title>Just a moment...</title><body>ok</body></html>";
+        let mut response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\ncf-mitigated: challenge\r\nSet-Cookie: cf_clearance=abc; Path=/\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let rewritten = process_upstream_response(&response, "h2", true).unwrap();
+        let text = String::from_utf8(rewritten).unwrap();
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden\r\n") || text.starts_with("HTTP/1.1 403 Error\r\n"));
+        assert!(text.to_ascii_lowercase().contains("content-type: text/html"));
+        assert!(text.to_ascii_lowercase().contains("cf-mitigated: challenge"));
+        assert!(text.contains("Set-Cookie: cf_clearance=abc; Path=/"));
+        assert!(text.contains("<title>Just a moment...</title>"));
+        assert!(!text.contains("Cloudflare HTML"));
+    }
+
+    #[test]
+    fn html_challenge_still_errors_for_json_accept() {
+        let body = b"<html><title>Just a moment...</title><body>ok</body></html>";
+        let mut response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let error = process_upstream_response(&response, "h2", false).unwrap_err();
+        assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title=Just a moment...");
+    }
+
+    #[test]
     fn cf_mitigated_header_is_not_forwarded() {
         let response = b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 2\r\n\r\n{}";
-        let error = process_upstream_response(response, "h2").unwrap_err();
+        let error = process_upstream_response(response, "h2", false).unwrap_err();
         assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title={}");
     }
 
@@ -544,7 +590,7 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(&compressed);
-        let rewritten = process_upstream_response(&response, "http/1.1").unwrap();
+        let rewritten = process_upstream_response(&response, "http/1.1", false).unwrap();
         let text = String::from_utf8(rewritten).unwrap();
         assert!(text.contains("Content-Length: 17"));
         assert!(!text.to_ascii_lowercase().contains("content-encoding"));
@@ -572,7 +618,7 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(&compressed);
-        let rewritten = process_upstream_response(&response, "h2").unwrap();
+        let rewritten = process_upstream_response(&response, "h2", false).unwrap();
         let text = String::from_utf8(rewritten).unwrap();
         assert!(text.contains("Content-Length: 17"));
         assert!(!text.to_ascii_lowercase().contains("content-encoding"));
@@ -589,7 +635,7 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(&compressed);
-        let error = process_upstream_response(&response, "h2").unwrap_err();
+        let error = process_upstream_response(&response, "h2", false).unwrap_err();
         assert_eq!(error, "Cloudflare HTML 403 alpn=h2 title=Just a moment...");
         assert!(!error.contains("unsupported Content-Encoding"));
     }

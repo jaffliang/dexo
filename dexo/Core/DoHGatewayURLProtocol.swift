@@ -1,8 +1,8 @@
 import DoHGatewayPolicy
 import Foundation
 
-/// Rewrites HTTPS URLSession requests onto the app-local HTTP gateway.
-/// WKWebView / SFSafariViewController do not consult `URLProtocol`.
+/// Rewrites HTTPS URLSession / Alamofire / SDWebImage requests onto the
+/// app-local HTTP gateway. WKWebView is not routed through this protocol.
 nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable {
     private static let relay = Relay()
     private var relayTask: URLSessionDataTask?
@@ -13,6 +13,14 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
             classes.insert(DoHGatewayURLProtocol.self, at: 0)
             configuration.protocolClasses = classes
         }
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+    }
+
+    /// Drop a Relay session that was built before `connectionProxyDictionary`
+    /// was set. Gateway start/stop always rebuilds so overlay leftovers
+    /// cannot keep timing out `127.0.0.1`.
+    static func resetRelaySession() {
+        relay.recreateSession()
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -28,16 +36,22 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
 
     override func startLoading() {
         let configuration = DoHGatewayRuntime.shared.currentConfiguration
+        let outbound = DoHGatewayCookieBridge.prepareOutboundRequest(request)
         guard var rewritten = DoHGatewayPolicy.rewrittenRequest(
-            request,
+            outbound,
             configuration: configuration
         ) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
         rewritten.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.skipHeader)
+        if outbound.value(forHTTPHeaderField: "Accept")?
+            .localizedCaseInsensitiveContains("text/html") == true
+        {
+            rewritten.setValue("1", forHTTPHeaderField: DoHGatewayPolicy.passHTMLHeader)
+        }
         #if DEBUG
-        if let original = request.url?.absoluteString, let proxied = rewritten.url?.absoluteString {
+        if let original = outbound.url?.absoluteString, let proxied = rewritten.url?.absoluteString {
             print("[DoHGateway] \(request.httpMethod ?? "GET") \(original) -> \(proxied)")
         }
         #endif
@@ -54,7 +68,22 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
 private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var protocols: [Int: DoHGatewayURLProtocol] = [:]
-    private lazy var session: URLSession = {
+    private var session: URLSession!
+
+    override init() {
+        super.init()
+        session = Self.makeSession(delegate: self)
+    }
+
+    func recreateSession() {
+        lock.lock()
+        session.invalidateAndCancel()
+        protocols.removeAll()
+        session = Self.makeSession(delegate: self)
+        lock.unlock()
+    }
+
+    private static func makeSession(delegate: URLSessionDataDelegate) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = []
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -62,12 +91,17 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+        if #available(iOS 17.0, *) {
+            configuration.proxyConfigurations = []
+        }
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
 
     func start(_ request: URLRequest, owner urlProtocol: DoHGatewayURLProtocol) -> URLSessionDataTask {
-        let task = session.dataTask(with: request)
         lock.lock()
+        let session = self.session!
+        let task = session.dataTask(with: request)
         protocols[task.taskIdentifier] = urlProtocol
         lock.unlock()
         task.resume()
@@ -90,6 +124,7 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
             completionHandler(.cancel)
             return
         }
+        DoHGatewayCookieBridge.mergeResponse(response, original: urlProtocol.request)
         let mapped = mappedResponse(response, original: urlProtocol.request)
         urlProtocol.client?.urlProtocol(urlProtocol, didReceive: mapped, cacheStoragePolicy: .notAllowed)
         completionHandler(.allow)
@@ -118,6 +153,7 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
             completionHandler(nil)
             return
         }
+        DoHGatewayCookieBridge.mergeResponse(response, original: urlProtocol.request)
         let mapped = mappedResponse(response, original: urlProtocol.request)
         let next = DoHGatewayPolicy.requestForOuterRedirect(newRequest)
         urlProtocol.client?.urlProtocol(urlProtocol, wasRedirectedTo: next, redirectResponse: mapped)
@@ -185,5 +221,104 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
             httpVersion: "HTTP/1.1",
             headerFields: headers
         ) ?? http
+    }
+}
+
+/// Injects the native cookie jar onto URLProtocol requests and writes
+/// `Set-Cookie` back. WKWebView custom-scheme requests often arrive without
+/// `WKHTTPCookieStore` cookies, and the Relay session does not store them.
+nonisolated enum DoHGatewayCookieBridge {
+    static func prepareOutboundRequest(_ request: URLRequest) -> URLRequest {
+        guard isOriginalForumURL(request.url) else { return request }
+        let schemesRetained = WebViewCustomProtocolSchemes.isRetained
+        let cookieHeader = request.value(forHTTPHeaderField: "Cookie")
+        let missingCookie = cookieHeader == nil || cookieHeader?.isEmpty == true
+        let isChallengeWebViewPath = isChallengeWebViewPath(
+            schemesRetained: schemesRetained,
+            accept: request.value(forHTTPHeaderField: "Accept"),
+            hasUserApiKeyHeader: request.value(forHTTPHeaderField: "User-Api-Key") != nil
+        )
+        guard shouldApplyNativeSessionHeaders(
+            schemesRetained: schemesRetained,
+            missingCookie: missingCookie
+        ) else {
+            return request
+        }
+
+        return onMain {
+            var outbound = request
+            let hasKey = hasUserApiKey(for: request.url)
+            let guestBrowsing = guestBrowsing(
+                isChallengeWebViewPath: isChallengeWebViewPath,
+                hasUserApiKey: hasKey
+            )
+            WebCookieStore.shared.applySessionHeaders(to: &outbound, guestBrowsing: guestBrowsing)
+            return outbound
+        }
+    }
+
+    static func mergeResponse(_ response: URLResponse, original request: URLRequest) {
+        guard let http = response as? HTTPURLResponse,
+              let originalURL = request.url,
+              isOriginalForumURL(originalURL)
+        else {
+            return
+        }
+        onMain {
+            WebCookieStore.shared.mergeProtocolResponse(http, for: originalURL)
+        }
+    }
+
+    static func shouldApplyNativeSessionHeaders(
+        schemesRetained: Bool,
+        missingCookie: Bool
+    ) -> Bool {
+        schemesRetained || missingCookie
+    }
+
+    /// Challenge / password-login WKWebView traffic (schemes registered, not a
+    /// JSON API Accept). Forum list/login JSON stays on the guest cookie policy
+    /// when no User-Api-Key is present.
+    static func isChallengeWebViewPath(
+        schemesRetained: Bool,
+        accept: String?,
+        hasUserApiKeyHeader: Bool
+    ) -> Bool {
+        guard schemesRetained, !hasUserApiKeyHeader else { return false }
+        let accept = accept?.lowercased() ?? ""
+        if accept.contains("application/json"), !accept.contains("text/html") {
+            return false
+        }
+        return true
+    }
+
+    static func guestBrowsing(isChallengeWebViewPath: Bool, hasUserApiKey: Bool) -> Bool {
+        !isChallengeWebViewPath && !hasUserApiKey
+    }
+
+    static func forumBaseURL(from url: URL) -> String? {
+        guard let scheme = url.scheme, let host = url.host, !host.isEmpty else { return nil }
+        return "\(scheme)://\(host)"
+    }
+
+    /// Cookie work is for the forum origin, never the loopback rewrite.
+    static func isOriginalForumURL(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased(), !host.isEmpty else { return false }
+        return host != "127.0.0.1" && host != "localhost" && host != "::1"
+    }
+
+    private static func hasUserApiKey(for url: URL?) -> Bool {
+        guard let url, let baseURL = forumBaseURL(from: url) else { return false }
+        return KeychainHelper.getUserApiKey(for: baseURL) != nil
+    }
+
+    @discardableResult
+    private static func onMain<T>(_ work: @MainActor () -> T) -> T {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated(work)
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated(work)
+        }
     }
 }

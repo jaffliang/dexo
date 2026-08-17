@@ -6,13 +6,31 @@ use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
+use crate::connect::ConnectGateway;
 use crate::doh::DohResolver;
 use crate::gateway::Gateway;
+use crate::mitm::MitmAuthority;
 use crate::tls::GatewayTls;
 
 struct RunningGateway {
     port: u16,
+    connect_port: u16,
     shutdown: watch::Sender<bool>,
+}
+
+static MITM_CA_DER: Mutex<Option<&'static [u8]>> = Mutex::new(None);
+
+fn store_mitm_ca(der: Vec<u8>) {
+    let leaked: &'static [u8] = Box::leak(der.into_boxed_slice());
+    if let Ok(mut slot) = MITM_CA_DER.lock() {
+        *slot = Some(leaked);
+    }
+}
+
+fn clear_mitm_ca() {
+    if let Ok(mut slot) = MITM_CA_DER.lock() {
+        *slot = None;
+    }
 }
 
 /// Whole start + linux.do probe must finish inside this budget so a blocked
@@ -93,17 +111,27 @@ pub extern "C" fn dexo_doh_gateway_start(doh_url: *const c_char, preferred_port:
                 .local_addr()
                 .map_err(|error| format!("listener address: {error}"))?
                 .port();
+            let connect_listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(|error| format!("bind CONNECT: {error}"))?;
+            let connect_port = connect_listener
+                .local_addr()
+                .map_err(|error| format!("CONNECT listener address: {error}"))?
+                .port();
+            let mitm = std::sync::Arc::new(
+                MitmAuthority::generate().map_err(|error| format!("{error}"))?,
+            );
             resolver
                 .probe()
                 .await
                 .map_err(|error| format!("{error}"))?;
-            Ok::<_, String>((port, listener, resolver, tls))
+            Ok::<_, String>((port, connect_port, listener, connect_listener, resolver, tls, mitm))
         })
         .await
         .map_err(|_| "DoH start timed out".to_string())?
     });
 
-    let (port, listener, resolver, tls) = match started {
+    let (port, connect_port, listener, connect_listener, resolver, tls, mitm) = match started {
         Ok(value) => value,
         Err(message) => {
             set_last_error(message);
@@ -111,16 +139,28 @@ pub extern "C" fn dexo_doh_gateway_start(doh_url: *const c_char, preferred_port:
         }
     };
 
+    store_mitm_ca(mitm.ca_der().to_vec());
     let (shutdown, rx) = watch::channel(false);
-    let gateway = Gateway::new(resolver, tls);
+    let connect_rx = rx.clone();
+    let gateway = Gateway::new(resolver.clone(), tls.clone());
+    let connect = ConnectGateway::new(resolver, gateway.clone(), mitm);
     runtime().spawn(async move {
         gateway.serve(listener, rx).await;
     });
-    eprintln!("[DoHGateway] listening on 127.0.0.1:{port} doh={url}");
+    runtime().spawn(async move {
+        connect.serve(connect_listener, connect_rx).await;
+    });
+    eprintln!(
+        "[DoHGateway] HTTP 127.0.0.1:{port} CONNECT 127.0.0.1:{connect_port} doh={url}"
+    );
     match STATE.lock() {
         Ok(mut state) => {
             stop_locked(&mut state);
-            *state = Some(RunningGateway { port, shutdown });
+            *state = Some(RunningGateway {
+                port,
+                connect_port,
+                shutdown,
+            });
         }
         Err(_) => {
             let _ = shutdown.send(true);
@@ -135,6 +175,7 @@ pub extern "C" fn dexo_doh_gateway_start(doh_url: *const c_char, preferred_port:
 pub extern "C" fn dexo_doh_gateway_stop() {
     if let Ok(mut state) = STATE.lock() {
         stop_locked(&mut state);
+        clear_mitm_ca();
         eprintln!("[DoHGateway] stopped");
     }
 }
@@ -146,6 +187,31 @@ pub extern "C" fn dexo_doh_gateway_port() -> i32 {
         .ok()
         .and_then(|state| state.as_ref().map(|running| running.port as i32))
         .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn dexo_doh_gateway_connect_port() -> i32 {
+    STATE
+        .lock()
+        .ok()
+        .and_then(|state| state.as_ref().map(|running| running.connect_port as i32))
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn dexo_doh_gateway_mitm_ca_der(out_len: *mut usize) -> *const u8 {
+    let empty: &[u8] = &[];
+    let slice = MITM_CA_DER
+        .lock()
+        .ok()
+        .and_then(|slot| *slot)
+        .unwrap_or(empty);
+    if !out_len.is_null() {
+        unsafe {
+            *out_len = slice.len();
+        }
+    }
+    slice.as_ptr()
 }
 
 #[no_mangle]

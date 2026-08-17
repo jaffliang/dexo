@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import Foundation
 import XCTest
 @testable import dexo
@@ -68,6 +69,7 @@ final class PasswordLoginAPIClientTests: XCTestCase {
         XCTAssertEqual(configuration.httpCookieAcceptPolicy, .never)
         XCTAssertFalse(configuration.httpShouldSetCookies)
         XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
     }
 
     func testLoginUsesURLSessionForCSRFHCaptchaAndSession() async throws {

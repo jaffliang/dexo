@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import XCTest
 @testable import dexo
 
@@ -8,12 +9,16 @@ final class DoHGatewayRuntimeTests: XCTestCase {
         XCTAssertTrue(
             configuration.protocolClasses?.contains(where: { $0 == DoHGatewayURLProtocol.self }) == true
         )
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
     }
 
     func testURLProtocolDoesNotInterceptWhenGatewayIsOff() throws {
         DoHGatewayRuntime.shared.stop()
         let request = URLRequest(url: try XCTUnwrap(URL(string: "https://linux.do/latest.json")))
         XCTAssertFalse(DoHGatewayURLProtocol.canInit(with: request))
+        XCTAssertFalse(DoHGatewayRuntime.shared.currentConfiguration.isConnectProxyActive)
+        XCTAssertEqual(DoHGatewayRuntime.shared.currentConfiguration.connectPort, 0)
+        XCTAssertNil(DoHGatewayRuntime.shared.mitmCACertificateData)
     }
 
     func testBuiltInDoHServersUsePublicHTTPSEndpoints() {

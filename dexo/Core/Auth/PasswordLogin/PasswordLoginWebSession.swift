@@ -104,6 +104,8 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
     /// During in-place CF interstitial, `window.open` must stay in this WebView
     /// (same kernel as `cf_clearance`), not spawn an hCaptcha-style popup.
     var isChallengeMode = false
+    var loadProbe: WebViewDoHLoadProbe?
+    private var trustEvaluator: WebViewProxyTrustEvaluator?
 
     init(session: PasswordLoginWebSession) {
         self.session = session
@@ -148,6 +150,16 @@ private nonisolated final class PasswordLoginWebViewDelegateBridge: NSObject, WK
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            loadProbe?.markDidReceiveServerTrust()
+        }
+        if trustEvaluator == nil {
+            trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
+        }
+        if let credential = trustEvaluator?.credential(for: challenge) {
+            completionHandler(.useCredential, credential)
+            return
+        }
         completionHandler(.performDefaultHandling, nil)
     }
 
@@ -193,6 +205,7 @@ final class PasswordLoginWebSession {
     private var clearancePollTask: Task<Void, Never>?
     private var navigationContinuation: CheckedContinuation<Void, Error>?
     private var originTimeoutTask: Task<Void, Never>?
+    private var challengeDoHSession: AnyObject?
 
     init(forum: ForumInstance, config: PasswordLoginConfig) {
         self.forum = forum
@@ -205,10 +218,11 @@ final class PasswordLoginWebSession {
         let wkConfig = WKWebViewConfiguration()
         wkConfig.websiteDataStore = WebCookieStore.shared.websiteDataStore
         wkConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // Skip DoH MITM so Cloudflare + hCaptcha stay on system DNS/TLS
-        // (no-op on iOS 15). Login API traffic uses URLSession instead.
-        if #available(iOS 17.0, *) {
-            wkConfig.websiteDataStore.proxyConfigurations = []
+        // iOS 17+: isolated CONNECT (forum MITM+ECH, Turnstile/hCaptcha E2E).
+        // iOS 15/16: shared jar, Safari TLS. URLSession still uses DoH+ECH.
+        challengeDoHSession = await WebViewDoHConfigurator.attachIsolatedConnectStore(wkConfig)
+        if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: challengeDoHSession) {
+            throw warning
         }
         let controller = wkConfig.userContentController
         let bridge = PasswordLoginScriptBridge(session: self)
@@ -230,6 +244,7 @@ final class PasswordLoginWebSession {
         ))
 
         let webDelegate = PasswordLoginWebViewDelegateBridge(session: self)
+        webDelegate.loadProbe = WebViewDoHLoadProbe(lease: challengeDoHSession)
         self.webDelegate = webDelegate
 
         let webView = WKWebView(frame: .zero, configuration: wkConfig)
@@ -258,6 +273,10 @@ final class PasswordLoginWebSession {
 
         self.webView = webView
         self.hostController = presenter
+        await WebCookieStore.shared.primeToWebView(
+            webView.configuration.websiteDataStore,
+            for: baseURL
+        )
     }
 
     func loadCaptchaPage() async throws {
@@ -338,9 +357,9 @@ final class PasswordLoginWebSession {
         return cookies.contains { $0.name == "cf_clearance" }
     }
 
-    /// Loads this forum's Cloudflare interstitial in this session's WKWebView
-    /// (system DNS/TLS). `cf_clearance` is copied to the native jar before
-    /// URLSession csrf / session.json.
+    /// Loads this forum's Cloudflare interstitial in this session's WKWebView.
+    /// On iOS 15 with DoH, traffic uses the URLProtocol gateway. `cf_clearance`
+    /// is copied to the native jar before URLSession csrf / session.json.
     /// Does not present a second `ChallengeViewController`. linux.do uses
     /// `/challenge`; idcflare uses `/login` because `/challenge` is 404.
     func runInPlaceCloudflareChallenge(url: URL) async throws {
@@ -494,6 +513,8 @@ final class PasswordLoginWebSession {
 
     func tearDown() {
         PasswordLoginCrashBreadcrumb.record(.teardown)
+        (challengeDoHSession as? WebViewLegacyChallengeSession)?.release()
+        challengeDoHSession = nil
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
         clearancePollTask?.cancel()
@@ -639,12 +660,13 @@ final class PasswordLoginWebSession {
         }
         originTimeoutTask?.cancel()
         originTimeoutTask = nil
+        let body = WebViewChallengeDoHDiagnostics.detail(for: error, probe: webDelegate?.loadProbe)
         if navigationContinuation != nil {
             takeNavigationContinuation()?.resume(
                 throwing: PasswordLoginError.unexpected(
                     status: 0,
                     phase: "origin",
-                    body: error.localizedDescription
+                    body: body
                 )
             )
             return
@@ -654,7 +676,7 @@ final class PasswordLoginWebSession {
             throwing: PasswordLoginError.unexpected(
                 status: 0,
                 phase: "cloudflare",
-                body: error.localizedDescription
+                body: body
             )
         )
     }

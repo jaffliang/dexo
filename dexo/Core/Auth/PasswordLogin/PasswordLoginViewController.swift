@@ -471,8 +471,9 @@ final class PasswordLoginViewController: BaseViewController {
         captchaToken: String?,
         secondFactor: String?
     ) async throws {
-        // WebView stays on system DNS for CF / hCaptcha. csrf + session.json
-        // must use URLSession so iOS 15 DoH gateway can reach linux.do.
+        // csrf + session.json must use URLSession so the DoH+ECH gateway
+        // can reach linux.do on every iOS version. The captcha WebView is
+        // Safari TLS on iOS 15/16 and isolated CONNECT on iOS 17.
         if secondFactor == nil {
             await session.syncWebSessionToNativeJar()
         }

@@ -9,9 +9,11 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
     private var configuration = DoHGatewayPolicy.Configuration(
         isEnabled: false,
         gatewayPort: 0,
-        dohHost: nil
+        dohHost: nil,
+        connectPort: 0
     )
     private var lastErrorStorage: String?
+    private var mitmCAStorage: Data?
     private var didRegisterURLProtocol = false
     private let workQueue = DispatchQueue(label: "com.eilgnaw.dexo.doh-gateway")
 
@@ -29,6 +31,13 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
         return lastErrorStorage
     }
 
+    /// CONNECT MITM CA (DER). Isolated WebViews trust this; it is not in the system store.
+    var mitmCACertificateData: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return mitmCAStorage
+    }
+
     /// True when `libdexo_doh_gateway.a` was built with Encrypted Client Hello.
     static var echCompiled: Bool {
         dexo_doh_gateway_ech_compiled() != 0
@@ -40,8 +49,8 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
             : String(localized: "settings.doh.ech_compiled.no")
     }
 
-    /// Inserts the gateway `URLProtocol` into every URLSession the app creates
-    /// for forum API / image traffic. Safe to call more than once.
+    /// Inserts the gateway `URLProtocol` and disables leftover HTTP proxies
+    /// on every URLSession the app creates for forum API / image traffic.
     static func prepare(_ configuration: URLSessionConfiguration) {
         DoHGatewayURLProtocol.register(on: configuration)
     }
@@ -85,20 +94,35 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
             return false
         }
 
+        let connectPort = dexo_doh_gateway_connect_port()
+        let caData = Self.copyMitmCACertificate()
         lock.lock()
         configuration = DoHGatewayPolicy.Configuration(
             isEnabled: true,
             gatewayPort: Int(port),
-            dohHost: serverURL.host
+            dohHost: serverURL.host,
+            connectPort: Int(connectPort)
         )
+        mitmCAStorage = caData
         lock.unlock()
         registerGlobalURLProtocol()
-        print("[DoHGateway] URLSession/Alamofire traffic via 127.0.0.1:\(port) doh=\(serverURL.absoluteString)")
+        DoHGatewayURLProtocol.resetRelaySession()
+        print(
+            "[DoHGateway] URLSession HTTP 127.0.0.1:\(port) WebView CONNECT 127.0.0.1:\(connectPort) doh=\(serverURL.absoluteString)"
+        )
         return true
     }
 
     func stop() {
         stopListener()
+    }
+
+    private static func copyMitmCACertificate() -> Data? {
+        var length: size_t = 0
+        guard let pointer = dexo_doh_gateway_mitm_ca_der(&length), length > 0 else {
+            return nil
+        }
+        return Data(bytes: pointer, count: Int(length))
     }
 
     private func recordError(_ message: String) {
@@ -118,18 +142,22 @@ nonisolated final class DoHGatewayRuntime: @unchecked Sendable {
 
     private func stopListener() {
         dexo_doh_gateway_stop()
+        DoHGatewayURLProtocol.resetRelaySession()
         unregisterGlobalURLProtocol()
         lock.lock()
         configuration = DoHGatewayPolicy.Configuration(
             isEnabled: false,
             gatewayPort: 0,
-            dohHost: nil
+            dohHost: nil,
+            connectPort: 0
         )
+        mitmCAStorage = nil
         lock.unlock()
     }
 
     /// So `URLSession.shared` and configs that missed `prepare` still rewrite.
-    /// The inner Relay session sets `protocolClasses = []` and will not recurse.
+    /// The inner Relay session sets `protocolClasses = []`, disables HTTP
+    /// proxies, and will not recurse.
     private func registerGlobalURLProtocol() {
         lock.lock()
         let already = didRegisterURLProtocol

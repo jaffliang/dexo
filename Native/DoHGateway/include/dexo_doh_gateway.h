@@ -1,6 +1,7 @@
 #ifndef DEXO_DOH_GATEWAY_H
 #define DEXO_DOH_GATEWAY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -20,8 +21,15 @@ int32_t dexo_doh_gateway_start(const char *doh_url, uint16_t preferred_port);
 /// Stops the gateway if it is running. Safe to call when already stopped.
 void dexo_doh_gateway_stop(void);
 
-/// Bound loopback port, or 0 when the gateway is not running.
+/// Bound loopback HTTP reverse-proxy port, or 0 when the gateway is not running.
 int32_t dexo_doh_gateway_port(void);
+
+/// Bound loopback CONNECT port for isolated WKWebView stores, or 0 when down.
+int32_t dexo_doh_gateway_connect_port(void);
+
+/// DER of the CONNECT MITM CA. `*out_len` is set. Pointer is valid until the
+/// next start/stop. Copy immediately. NULL / zero length when not running.
+const uint8_t *dexo_doh_gateway_mitm_ca_der(size_t *out_len);
 
 /// 1 when the accept loop is running, otherwise 0.
 int32_t dexo_doh_gateway_is_running(void);

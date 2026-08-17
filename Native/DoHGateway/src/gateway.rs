@@ -22,6 +22,7 @@ const HOST_HEADER: &str = "x-dexo-gateway-host";
 const PORT_HEADER: &str = "x-dexo-gateway-port";
 const SCHEME_HEADER: &str = "x-dexo-gateway-scheme";
 const SKIP_HEADER: &str = "x-dexo-gateway-skip";
+const PASS_HTML_HEADER: &str = "x-dexo-pass-html";
 
 #[derive(Clone)]
 pub struct Gateway {
@@ -69,31 +70,37 @@ impl Gateway {
                 return Err(error);
             }
         };
-        let upstream = match upstream_target(&request) {
-            Ok(upstream) => upstream,
+        match self.execute_http(&request).await {
+            Ok(bytes) => {
+                client
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| format!("client write: {error}"))?;
+                Ok(())
+            }
             Err(error) => {
                 write_error(&mut client, 502, &error).await?;
-                return Ok(());
+                Ok(())
             }
-        };
+        }
+    }
+
+    /// One HTTP reverse-proxy exchange (DoH + ECH/visible TLS). Used by the
+    /// plaintext URLSession listener and by CONNECT MITM after local TLS.
+    pub(crate) async fn execute_http(&self, request: &ParsedRequest) -> Result<Vec<u8>, String> {
+        let upstream = upstream_target(request)?;
         if upstream.host.eq_ignore_ascii_case(self.resolver.host()) {
-            return write_error(&mut client, 502, "refusing to proxy the DoH resolver").await;
+            return Err("refusing to proxy the DoH resolver".into());
         }
 
-        let lookup = match self.resolver.lookup(&upstream.host).await {
-            Ok(lookup) => lookup,
-            Err(error) => {
-                return write_error(
-                    &mut client,
-                    502,
-                    &format!("DoH lookup {}: {error}", upstream.host),
-                )
-                .await;
-            }
-        };
+        let lookup = self
+            .resolver
+            .lookup(&upstream.host)
+            .await
+            .map_err(|error| format!("DoH lookup {}: {error}", upstream.host))?;
         let addresses = ordered_addresses(&lookup);
         if addresses.is_empty() {
-            return write_error(&mut client, 502, "DoH returned no addresses").await;
+            return Err("DoH returned no addresses".into());
         }
 
         let ech_config = lookup
@@ -116,7 +123,7 @@ impl Gateway {
             } else {
                 None
             };
-            match self.forward(&request, &upstream, addr, ech_for_ip).await {
+            match self.forward(request, &upstream, addr, ech_for_ip).await {
                 Ok(response) => {
                     eprintln!(
                         "[DoHGateway] {} {} -> {} ({}) ech={}",
@@ -126,11 +133,7 @@ impl Gateway {
                         lookup_summary(&lookup),
                         use_ech && response.1
                     );
-                    client
-                        .write_all(&response.0)
-                        .await
-                        .map_err(|error| format!("client write: {error}"))?;
-                    return Ok(());
+                    return Ok(response.0);
                 }
                 Err(error) => {
                     eprintln!(
@@ -150,12 +153,7 @@ impl Gateway {
                 }
             }
         }
-        write_error(
-            &mut client,
-            502,
-            &format_failure_report(has_ech, &lookup, &attempts),
-        )
-        .await
+        Err(format_failure_report(has_ech, &lookup, &attempts))
     }
 
     async fn forward(
@@ -238,7 +236,7 @@ fn should_try_visible_sni(ech_present: bool) -> bool {
     !ech_present
 }
 
-async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
+pub(crate) async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream, String> {
     connect_tcp_within(addr, CONNECT_TIMEOUT).await
 }
 
@@ -391,7 +389,13 @@ async fn proxy_http2(
     )
     .await
     .map_err(|_| "upstream read timeout".to_string())??;
-    http::process_upstream_parts(status, &headers, body, alpn)
+    http::process_upstream_parts(
+        status,
+        &headers,
+        body,
+        alpn,
+        should_pass_html_challenge(request),
+    )
 }
 
 async fn proxy_http11(
@@ -414,14 +418,14 @@ async fn proxy_http11(
     if response.is_empty() {
         return Err("empty upstream response".into());
     }
-    http::process_upstream_response(&response, alpn)
+    http::process_upstream_response(&response, alpn, should_pass_html_challenge(request))
 }
 
 #[derive(Debug)]
-struct ParsedRequest {
+pub(crate) struct ParsedRequest {
     method: String,
     target: String,
-    headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -519,6 +523,7 @@ fn forwarded_request_headers(request: &ParsedRequest) -> Vec<(String, String)> {
         if is_hop_by_hop(name)
             || name.eq_ignore_ascii_case("host")
             || name.eq_ignore_ascii_case(SKIP_HEADER)
+            || name.eq_ignore_ascii_case(PASS_HTML_HEADER)
             || name.to_ascii_lowercase().starts_with("x-dexo-gateway-")
         {
             continue;
@@ -562,6 +567,18 @@ fn sanitize_accept_encoding(value: &str) -> Option<String> {
     } else {
         Some(parts.join(", "))
     }
+}
+
+fn should_pass_html_challenge(request: &ParsedRequest) -> bool {
+    if header_value(&request.headers, PASS_HTML_HEADER)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    header_value(&request.headers, "accept")
+        .map(|accept| accept.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
 }
 
 fn host_header(upstream: &Upstream) -> String {
@@ -649,7 +666,7 @@ fn is_cloudflare_ipv4(ip: Ipv4Addr) -> bool {
     })
 }
 
-fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<IpAddr> {
+pub(crate) fn ordered_addresses(lookup: &crate::dns::Lookup) -> Vec<IpAddr> {
     let hints = ipv4_hints(lookup);
     let mut preferred = Vec::new();
     let mut other_cf = Vec::new();
@@ -740,7 +757,10 @@ async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Resu
     Ok(())
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<ParsedRequest, String> {
+pub(crate) async fn read_http_request<S>(stream: &mut S) -> Result<ParsedRequest, String>
+where
+    S: AsyncReadExt + Unpin,
+{
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -925,6 +945,34 @@ mod tests {
         assert!(headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("accept-encoding") && value == "gzip, deflate, br"
         }));
+    }
+
+    #[test]
+    fn browser_accept_or_pass_html_header_allows_interstitial() {
+        assert!(should_pass_html_challenge(&request(vec![(
+            "Accept",
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
+        )])));
+        assert!(should_pass_html_challenge(&request(vec![(PASS_HTML_HEADER, "1")])));
+        assert!(!should_pass_html_challenge(&request(vec![("Accept", "application/json")])));
+        assert!(!should_pass_html_challenge(&request(vec![])));
+    }
+
+    #[test]
+    fn pass_html_header_is_not_forwarded_upstream() {
+        let parsed = request(vec![
+            ("Host", "127.0.0.1:1"),
+            (HOST_HEADER, "linux.do"),
+            ("Accept", "text/html"),
+            (PASS_HTML_HEADER, "1"),
+        ]);
+        let headers = forwarded_request_headers(&parsed);
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(PASS_HTML_HEADER)));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("accept") && value.contains("text/html")));
     }
 
     #[test]

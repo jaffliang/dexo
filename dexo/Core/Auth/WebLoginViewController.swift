@@ -37,6 +37,7 @@ final class WebLoginViewController: BaseViewController {
             forMainFrameOnly: true
         )
         config.userContentController.addUserScript(darkModeCSS)
+        // iOS 17+ isolated CONNECT. iOS 15/16 is a no-op (Safari TLS).
         let lease = try await WebViewDoHConfigurator.configure(config)
         return (config, lease)
     }
@@ -301,7 +302,7 @@ final class WebLoginViewController: BaseViewController {
 
     // MARK: - Coordinator
 
-    private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked Sendable {
         private let targetHost: String
         private let onCookiesReady: ([HTTPCookie]) -> Void
         private let trustEvaluator: WebViewProxyTrustEvaluator?

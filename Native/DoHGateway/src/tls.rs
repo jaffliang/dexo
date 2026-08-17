@@ -108,7 +108,7 @@ pub fn negotiated_alpn(tls: &TlsStream<TcpStream>) -> &'static str {
     }
 }
 
-fn install_provider() {
+pub(crate) fn install_provider() {
     let _ = browser_like_provider().install_default();
 }
 

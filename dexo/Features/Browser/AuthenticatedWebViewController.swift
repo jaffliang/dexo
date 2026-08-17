@@ -12,6 +12,7 @@ final class AuthenticatedWebViewController: BaseViewController {
     private var setupTask: Task<Void, Never>?
     private var progressObservation: NSKeyValueObservation?
     private var coordinator: Coordinator?
+    private var loadProbe: WebViewDoHLoadProbe?
     /// Canonical URLs already loaded by a `/login` bypass, to stop OAuth loops.
     fileprivate var bypassedLoginLoads: Set<String> = []
 
@@ -19,6 +20,16 @@ final class AuthenticatedWebViewController: BaseViewController {
         let progressView = UIProgressView(progressViewStyle: .bar)
         progressView.translatesAutoresizingMaskIntoConstraints = false
         return progressView
+    }()
+
+    private lazy var loadErrorBanner: UILabel = {
+        let label = UILabel()
+        label.font = FontManager.shared.font(size: 13)
+        label.textAlignment = .left
+        label.numberOfLines = 0
+        label.isHidden = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
     }()
 
     private lazy var backItem = UIBarButtonItem(
@@ -136,10 +147,14 @@ final class AuthenticatedWebViewController: BaseViewController {
         ]
 
         view.addSubview(progressView)
+        view.addSubview(loadErrorBanner)
         NSLayoutConstraint.activate([
             progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            loadErrorBanner.topAnchor.constraint(equalTo: progressView.bottomAnchor, constant: 8),
+            loadErrorBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            loadErrorBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
         ])
 
         setupTask = Task { [weak self] in
@@ -153,6 +168,8 @@ final class AuthenticatedWebViewController: BaseViewController {
         progressView.progressTintColor = theme.accentColor
         navigationController?.toolbar.tintColor = theme.accentColor
         navigationController?.navigationBar.tintColor = theme.accentColor
+        loadErrorBanner.textColor = UIColor.secondaryLabel
+        loadErrorBanner.backgroundColor = theme.backgroundColor
         webView?.backgroundColor = theme.cardBackgroundColor
         webView?.underPageBackgroundColor = theme.cardBackgroundColor
         for popup in popupWebViews {
@@ -181,11 +198,16 @@ final class AuthenticatedWebViewController: BaseViewController {
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = WebCookieStore.shared.websiteDataStore
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-            let lease = try await WebViewDoHConfigurator.configurePreservingDataStore(configuration)
+            let lease = await WebViewDoHConfigurator.attachIsolatedConnectStore(configuration)
+            if let warning = WebViewDoHConfigurator.legacyAttachWarning(from: lease) {
+                throw warning
+            }
             guard !Task.isCancelled else { return }
 
             proxyLease = lease
-            let coordinator = Coordinator(owner: self)
+            let probe = WebViewDoHLoadProbe(lease: lease)
+            loadProbe = probe
+            let coordinator = Coordinator(owner: self, loadProbe: probe)
             self.coordinator = coordinator
 
             let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -206,6 +228,7 @@ final class AuthenticatedWebViewController: BaseViewController {
                 webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                 webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             ])
+            view.bringSubviewToFront(loadErrorBanner)
 
             progressObservation = webView.observe(\.estimatedProgress, options: .new) { [weak self] webView, _ in
                 let progress = Float(webView.estimatedProgress)
@@ -269,11 +292,30 @@ final class AuthenticatedWebViewController: BaseViewController {
     }
 
     fileprivate func handleNavigationFinished(in webView: WKWebView) {
+        hideLoadError()
         if webView.url != nil {
             title = webView.title?.nilIfEmpty ?? String(localized: "browser.title")
         }
         updateBackItem()
         syncCookies(for: webView.url ?? initialURL)
+    }
+
+    fileprivate func handleNavigationFailed(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        loadErrorBanner.text = String(
+            format: String(localized: "browser.load_failed.message %@"),
+            WebViewChallengeDoHDiagnostics.detail(for: error, probe: loadProbe)
+        )
+        loadErrorBanner.isHidden = false
+        view.bringSubviewToFront(loadErrorBanner)
+        applyThemeBackground()
+    }
+
+    private func hideLoadError() {
+        loadErrorBanner.isHidden = true
     }
 
     fileprivate func handleLoginIntercept(
@@ -365,9 +407,11 @@ private extension String {
 private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked Sendable {
     weak var owner: AuthenticatedWebViewController?
     private let trustEvaluator: WebViewProxyTrustEvaluator?
+    private let loadProbe: WebViewDoHLoadProbe
 
-    init(owner: AuthenticatedWebViewController) {
+    init(owner: AuthenticatedWebViewController, loadProbe: WebViewDoHLoadProbe) {
         self.owner = owner
+        self.loadProbe = loadProbe
         trustEvaluator = WebViewDoHConfigurator.makeTrustEvaluator()
         super.init()
     }
@@ -377,6 +421,9 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            loadProbe.markDidReceiveServerTrust()
+        }
         if let credential = trustEvaluator?.credential(for: challenge) {
             completionHandler(.useCredential, credential)
             return
@@ -387,6 +434,25 @@ private nonisolated final class Coordinator: NSObject, WKNavigationDelegate, WKU
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.async { [weak self] in
             self?.owner?.handleNavigationFinished(in: webView)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            self?.owner?.handleNavigationFailed(error)
+        }
+    }
+
+    /// SSL hard-fails (-1200) abort the *provisional* load. Without this
+    /// hook the in-app browser stays a blank page instead of the SSL banner
+    /// ChallengeViewController already shows.
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            self?.owner?.handleNavigationFailed(error)
         }
     }
 

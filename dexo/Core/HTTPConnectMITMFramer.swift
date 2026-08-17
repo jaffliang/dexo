@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import Foundation
 import Network
 import Security
@@ -74,8 +75,30 @@ nonisolated final class HTTPConnectMITMFramer: NWProtocolFramerImplementation, @
         }
 
         #if DEBUG
-        print("[WebViewDoHProxy] CONNECT \(request.host):\(request.port); upgrading to native TLS")
+        print("[WebViewDoHProxy] CONNECT \(request.host):\(request.port)")
         #endif
+
+        if WebViewDoHTunnelPolicy.shouldPassthroughTLS(host: request.host) {
+            WebViewDoHConnectDecision.push(
+                host: request.host,
+                port: request.port,
+                passthrough: true
+            )
+            framer.writeOutput(data: Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
+            framer.passThroughInput()
+            framer.passThroughOutput()
+            framer.markReady()
+            #if DEBUG
+            print("[WebViewDoHProxy] passthrough Safari TLS for \(request.host)")
+            #endif
+            return 0
+        }
+
+        WebViewDoHConnectDecision.push(
+            host: request.host,
+            port: request.port,
+            passthrough: false
+        )
 
         let identity: WebViewProxyTLSIdentity
         do {

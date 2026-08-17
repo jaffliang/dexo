@@ -16,9 +16,10 @@ final class EncryptedDNSManager {
     /// Seeds preferences and kicks off the gateway off the main thread.
     /// Returns immediately so first paint cannot block on `block_on(probe)`.
     func applyCurrentSettings() {
-        // Strip leftover `_setProxyConfiguration:` before any URLSession work.
-        // A previous debug IPA applied that SPI to the shared cookie jar; it
-        // is not WebView-scoped and can time out URLSession DoH.
+        // Strip leftover WebKit HTTP proxies before any URLSession work.
+        // PR 23 leaked `_setProxyConfiguration:`; v2.2-pr26-connect leaked
+        // `_setHTTPProxy:` / `httpProxy` on a persistent default store.
+        // Either one sends URLSession through a dead CONNECT port (-1001).
         clearLeftoverWebKitHTTPProxies()
         AppSettings.shared.seedDefaultDoHServersIfNeeded()
         installOnSharedImageDownloader()
@@ -100,7 +101,8 @@ final class EncryptedDNSManager {
     }
 
     /// Clears leftover HTTP proxy settings on the process-shared website
-    /// data stores. Does not apply a proxy or start a listener.
+    /// data stores (`_setProxyConfiguration:` and `httpProxy`/`httpsProxy`).
+    /// Does not apply a proxy or start a listener.
     func clearLeftoverWebKitHTTPProxies() {
         let defaultStore = WKWebsiteDataStore.default()
         clearLeftoverWebKitHTTPProxy(on: defaultStore)
@@ -108,6 +110,7 @@ final class EncryptedDNSManager {
         if cookieStore !== defaultStore {
             clearLeftoverWebKitHTTPProxy(on: cookieStore)
         }
+        WebViewCustomProtocolSchemes.unregisterIfNeeded()
     }
 
     private func clearLeftoverWebKitHTTPProxy(on dataStore: WKWebsiteDataStore) {
