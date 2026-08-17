@@ -132,36 +132,18 @@ nonisolated final class WebViewProxyTrustEvaluator: @unchecked Sendable {
     static func certificate(_ leaf: SecCertificate, matchesHost host: String) -> Bool {
         let expected = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
         guard !expected.isEmpty else { return false }
-        let names = dnsNames(in: leaf)
-        if names.isEmpty {
+        if let summary = SecCertificateCopySubjectSummary(leaf) as String?,
+           nameMatches(summary, host: expected)
+        {
             return true
         }
-        return names.contains { nameMatches($0, host: expected) }
-    }
-
-    private static func dnsNames(in certificate: SecCertificate) -> [String] {
-        var names: [String] = []
-        if let summary = SecCertificateCopySubjectSummary(certificate) as String? {
-            let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                names.append(trimmed)
-            }
+        // iOS has no SecCertificateCopyValues. The MITM leaf embeds the
+        // CONNECT host as CN/SAN ASCII in the DER.
+        let der = SecCertificateCopyData(leaf) as Data
+        if der.range(of: Data(expected.utf8)) != nil {
+            return true
         }
-        if let values = SecCertificateCopyValues(
-            certificate,
-            [kSecOIDSubjectAltName] as CFArray,
-            nil
-        ) as? [String: Any],
-           let san = values[kSecOIDSubjectAltName as String] as? [String: Any],
-           let entries = san[kSecPropertyKeyValue as String] as? [[String: Any]]
-        {
-            for entry in entries {
-                if let value = entry[kSecPropertyKeyValue as String] as? String, !value.isEmpty {
-                    names.append(value)
-                }
-            }
-        }
-        return names
+        return false
     }
 
     private static func nameMatches(_ name: String, host: String) -> Bool {
