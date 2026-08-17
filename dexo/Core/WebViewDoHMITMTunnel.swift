@@ -1,10 +1,11 @@
+import DoHGatewayPolicy
 import Foundation
 import Network
 
 /// FIFO of CONNECT decisions from `HTTPConnectMITMFramer` to the tunnel.
 /// The listener queue is serial, so push/pop stay paired per connection.
 @available(iOS 17.0, *)
-enum WebViewDoHConnectDecision {
+nonisolated enum WebViewDoHConnectDecision {
     struct Route: Equatable {
         let host: String
         let port: UInt16

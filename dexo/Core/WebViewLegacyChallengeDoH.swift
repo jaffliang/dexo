@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import Foundation
 import Network
 import WebKit
