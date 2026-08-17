@@ -115,8 +115,9 @@ final class WebViewLegacyChallengeDoHTests: XCTestCase {
     func testRelaySessionDoesNotInstallProxyOrRecurse() {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = []
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
         XCTAssertEqual(configuration.protocolClasses?.count, 0)
-        XCTAssertNil(configuration.connectionProxyDictionary)
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
         if #available(iOS 17.0, *) {
             XCTAssertTrue(configuration.proxyConfigurations.isEmpty)
         }

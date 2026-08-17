@@ -25,6 +25,44 @@ public enum DoHGatewayPolicy {
     /// visible-SNI TLS and surfaces `URLError.secureConnectionFailed`.
     public static let relayFollowsHTTPRedirects = false
 
+    /// Forces URLSession to ignore process-wide HTTP/HTTPS/SOCKS/PAC proxies.
+    /// Overlay installs can keep a leftover CONNECT proxy in CFNetwork after
+    /// `_setHTTPProxy:` leaked; loopback gateway hops must stay direct.
+    public static var directConnectionProxyDictionary: [AnyHashable: Any] {
+        var dictionary: [AnyHashable: Any] = [
+            "HTTPEnable": 0,
+            "HTTPSEnable": 0,
+            "SOCKSEnable": 0,
+            "ProxyAutoConfigEnable": 0,
+        ]
+        #if canImport(CFNetwork)
+        dictionary[kCFNetworkProxiesHTTPEnable] = 0
+        dictionary[kCFNetworkProxiesProxyAutoConfigEnable] = 0
+        #endif
+        return dictionary
+    }
+
+    public static func applyDirectConnectionProxy(_ configuration: URLSessionConfiguration) {
+        configuration.connectionProxyDictionary = directConnectionProxyDictionary
+    }
+
+    public static func disablesConnectionProxies(_ dictionary: [AnyHashable: Any]?) -> Bool {
+        guard let dictionary else { return false }
+        return isProxyDisabled(dictionary["HTTPEnable"])
+            && isProxyDisabled(dictionary["HTTPSEnable"])
+            && isProxyDisabled(dictionary["SOCKSEnable"])
+    }
+
+    private static func isProxyDisabled(_ value: Any?) -> Bool {
+        if let number = value as? NSNumber {
+            return number.intValue == 0
+        }
+        if let flag = value as? Bool {
+            return flag == false
+        }
+        return false
+    }
+
     /// `NWParameters.PrivacyContext` is encrypted DNS only (visible SNI).
     /// On iOS 15 the loopback gateway is the only ECH path — keep this off
     /// while the gateway is active so leaked URLSessions fail closed.

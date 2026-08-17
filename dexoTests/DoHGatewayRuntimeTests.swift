@@ -1,3 +1,4 @@
+import DoHGatewayPolicy
 import XCTest
 @testable import dexo
 
@@ -8,6 +9,7 @@ final class DoHGatewayRuntimeTests: XCTestCase {
         XCTAssertTrue(
             configuration.protocolClasses?.contains(where: { $0 == DoHGatewayURLProtocol.self }) == true
         )
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
     }
 
     func testURLProtocolDoesNotInterceptWhenGatewayIsOff() throws {

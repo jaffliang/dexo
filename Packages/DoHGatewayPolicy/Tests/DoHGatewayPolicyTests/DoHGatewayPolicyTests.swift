@@ -117,6 +117,17 @@ final class DoHGatewayPolicyTests: XCTestCase {
         XCTAssertFalse(DoHGatewayPolicy.enablePrivacyContextWhileGatewayActive)
     }
 
+    func testDirectConnectionProxyDisablesHTTPHTTPSAndSOCKS() {
+        let configuration = URLSessionConfiguration.ephemeral
+        XCTAssertFalse(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+        XCTAssertTrue(DoHGatewayPolicy.disablesConnectionProxies(configuration.connectionProxyDictionary))
+        let dictionary = configuration.connectionProxyDictionary ?? [:]
+        XCTAssertEqual((dictionary["HTTPEnable"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual((dictionary["HTTPSEnable"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual((dictionary["SOCKSEnable"] as? NSNumber)?.intValue, 0)
+    }
+
     func testRedirectLocationStaysOnOriginalHTTPSHost() throws {
         let location = try XCTUnwrap(URL(string: "https://linux.do/session/csrf"))
         XCTAssertTrue(DoHGatewayPolicy.shouldRewrite(location, configuration: active))

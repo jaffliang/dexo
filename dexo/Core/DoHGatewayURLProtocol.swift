@@ -13,6 +13,14 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
             classes.insert(DoHGatewayURLProtocol.self, at: 0)
             configuration.protocolClasses = classes
         }
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+    }
+
+    /// Drop a Relay session that was built before `connectionProxyDictionary`
+    /// was set. Gateway start/stop always rebuilds so overlay leftovers
+    /// cannot keep timing out `127.0.0.1`.
+    static func resetRelaySession() {
+        relay.recreateSession()
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -60,7 +68,22 @@ nonisolated final class DoHGatewayURLProtocol: URLProtocol, @unchecked Sendable 
 private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var protocols: [Int: DoHGatewayURLProtocol] = [:]
-    private lazy var session: URLSession = {
+    private var session: URLSession!
+
+    override init() {
+        super.init()
+        session = Self.makeSession(delegate: self)
+    }
+
+    func recreateSession() {
+        lock.lock()
+        session.invalidateAndCancel()
+        protocols.removeAll()
+        session = Self.makeSession(delegate: self)
+        lock.unlock()
+    }
+
+    private static func makeSession(delegate: URLSessionDataDelegate) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = []
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -68,12 +91,17 @@ private nonisolated final class Relay: NSObject, URLSessionDataDelegate, @unchec
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+        DoHGatewayPolicy.applyDirectConnectionProxy(configuration)
+        if #available(iOS 17.0, *) {
+            configuration.proxyConfigurations = []
+        }
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
 
     func start(_ request: URLRequest, owner urlProtocol: DoHGatewayURLProtocol) -> URLSessionDataTask {
-        let task = session.dataTask(with: request)
         lock.lock()
+        let session = self.session!
+        let task = session.dataTask(with: request)
         protocols[task.taskIdentifier] = urlProtocol
         lock.unlock()
         task.resume()
